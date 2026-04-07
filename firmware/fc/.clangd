@@ -1,0 +1,10 @@
+CompileFlags:
+  CompilationDatabase: build/Debug
+  Remove:
+    - "-mcpu=*"
+    - "-mfpu=*"
+    - "-mfloat-abi=*"
+    - "--specs=*"
+  Add:
+    - "-target"
+    - "arm-none-eabi"

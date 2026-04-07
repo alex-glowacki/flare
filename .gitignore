@@ -1,0 +1,33 @@
+# STM32 / CMake build artifacts
+firmware/fc/build/
+firmware/fc/cmake-build-*/
+firmware/fc/**/*.o
+firmware/fc/**/*.d
+firmware/fc/**/*.elf
+firmware/fc/**/*.bin
+firmware/fc/**/*.hex
+firmware/fc/**/*.map
+
+# PlatformIO build artifacts
+firmware/esp32_quad/.pio/
+firmware/esp32_remote/.pio/
+
+# PlatformIO auto-generated VS Code IntelliSense (regenerated on pio run)
+firmware/esp32_quad/.vscode/c_cpp_properties.json
+firmware/esp32_remote/.vscode/c_cpp_properties.json
+
+# VS Code personal preference files
+.cache/
+.vscode/
+**/.vscode/ipch/
+**/.vscode/*.code-workspace
+
+# macOS
+.DS_Store
+
+# Python (future companion computer code)
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+*.egg-info/
