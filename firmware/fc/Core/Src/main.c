@@ -19,7 +19,6 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "gpio.h"
-#include "stm32h7xx_hal_gpio.h"
 #include "usart.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -103,13 +102,13 @@ int main(void) {
   /* USER CODE BEGIN WHILE */
   while (1) {
     /* USER CODE END WHILE */
-    HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_0);
+    HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_7);
     HAL_UART_Transmit(&huart1, (uint8_t *)"hello\r\n", 7, HAL_MAX_DELAY);
-    HAL_Delay(2000);
-  }
-  /* USER CODE BEGIN 3 */
+    HAL_Delay(500);
+    /* USER CODE BEGIN 3 */
 
-  /* USER CODE END 3 */
+    /* USER CODE END 3 */
+  }
 }
 
 /**
@@ -173,8 +172,10 @@ void SystemClock_Config(void) {
 
 /* USER CODE END 4 */
 
-/* MPU Configuration */
-
+/**
+ * @brief  MPU Configuration
+ * @retval None
+ */
 void MPU_Config(void) {
   MPU_Region_InitTypeDef MPU_InitStruct = {0};
 
@@ -207,7 +208,6 @@ void MPU_Config(void) {
  */
 void Error_Handler(void) {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1) {
   }
@@ -224,9 +224,6 @@ void Error_Handler(void) {
  */
 void assert_failed(uint8_t *file, uint32_t line) {
   /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line
-     number, ex: printf("Wrong parameters value: file %s on line %d\r\n", file,
-     line) */
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
