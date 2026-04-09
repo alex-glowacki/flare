@@ -22,7 +22,6 @@
 #include "stm32h7xx_hal_gpio.h"
 #include "usart.h"
 
-
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -94,17 +93,19 @@ int main(void) {
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART1_UART_Init();
+
   /* USER CODE BEGIN 2 */
-  HAL_UART_Transmit(&huart1, (uint8_t *)"[FLARE] boot ok\r\n", 18, HAL_MAX_DELAY);
+  HAL_UART_Transmit(&huart1, (uint8_t *)"[FLARE] boot ok\r\n", 18,
+                    HAL_MAX_DELAY);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1) {
+    /* USER CODE END WHILE */
     HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_0);
     HAL_UART_Transmit(&huart1, (uint8_t *)"hello\r\n", 7, HAL_MAX_DELAY);
-    HAL_Delay(500);
-    /* USER CODE END WHILE */
+    HAL_Delay(2000);
   }
   /* USER CODE BEGIN 3 */
 
@@ -195,6 +196,7 @@ void MPU_Config(void) {
   MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
 
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
+
   /* Enables the MPU */
   HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 }
@@ -211,6 +213,7 @@ void Error_Handler(void) {
   }
   /* USER CODE END Error_Handler_Debug */
 }
+
 #ifdef USE_FULL_ASSERT
 /**
  * @brief  Reports the name of the source file and the source line number
