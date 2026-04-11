@@ -1,0 +1,18 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"name": "esp32_quad",
+			"path": "firmware/esp32_quad"
+		},
+		{
+			"name": "esp32_remote",
+			"path": "firmware/esp32_remote"
+		}
+	],
+	"settings": {
+		"stm32cube-ide-clangd.path": "cube"
+	}
+}
