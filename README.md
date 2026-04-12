@@ -29,7 +29,7 @@ hardware-notes.md
 | Phase | Goal                                              | Status  |
 |-------|---------------------------------------------------|---------|
 | 1     | STM32H7 bring-up — blink, UART, toolchain         | 🟡 In progress |
-| 2     | IMU bring-up — ICM-42688, sensor fusion           | 🔲      |
+| 2     | BMI bring-up — BMI323, sensor fusion              | 🔲      |
 | 3     | PID loop — stabilization, DSHOT motor output      | 🔲      |
 | 4     | RC link — ESP-NOW, channel parsing, arming        | 🔲      |
 | 5     | Remote firmware — sticks, OLED, switches          | 🔲      |
