@@ -8,12 +8,18 @@
   and `SCB_InvalidateDCache` after DMA RX. Forgetting this causes silent
   data corruption that is extremely hard to debug.
 
-## ICM-42688-P (IMU)
+## BMI323 IMU
 
-- SPI preferred (faster than I2C, needed for high sample rates)
+- **Interface:** SPI (do NOT use I2C — too slow for high-rate PID loops)
+- Check breakout board for I2C/SPI selection jumper before wiring — set to SPI
+- VCC is 3.3V — do not connect to 5V rail
+- CS pin is active-low; drive it low before SPI transaction, high after
+- INT1 pin signals data-ready — use this to trigger IMU reads in firmware (don't poll)
 - **Soft-mount the FC stack.** Motor vibration aliasing into the IMU is
   the leading cause of instability in DIY flight controllers. Use O-rings
   or foam standoffs.
+- WHO_AM_I register: 0x00, expected response: 0x43 (verify this against your
+  specific breakout board's datasheet)
 
 ## BLHeli_S 30A ESCs
 
