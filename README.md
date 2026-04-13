@@ -10,7 +10,7 @@ Custom 450mm quadcopter with a DIY STM32H7 flight controller and custom ESP-NOW 
 | Frame         | F450 450mm                    |
 | Props         | 10" 1045                      |
 | FC MCU        | STM32H723ZGT6 @ 550MHz        |
-| IMU           | ICM-42688-P (SPI)             |
+| IMU           | BMI323 (SPI)                  |
 | ESCs          | BLHeli_S 30A (DSHOT300)       |
 | RC Link       | ESP-NOW — Nano ESP32 × 2      |
 | Battery       | 3S LiPo (dev), 4S (flight)    |
@@ -29,7 +29,7 @@ hardware-notes.md
 | Phase | Goal                                              | Status  |
 |-------|---------------------------------------------------|---------|
 | 1     | STM32H7 bring-up — blink, UART, toolchain         | 🟡 In progress |
-| 2     | BMI bring-up — BMI323, sensor fusion              | 🔲      |
+| 2     | IMU bring-up — BMI323, sensor fusion              | 🔲      |
 | 3     | PID loop — stabilization, DSHOT motor output      | 🔲      |
 | 4     | RC link — ESP-NOW, channel parsing, arming        | 🔲      |
 | 5     | Remote firmware — sticks, OLED, switches          | 🔲      |
