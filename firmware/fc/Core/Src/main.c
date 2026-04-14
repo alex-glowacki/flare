@@ -22,10 +22,11 @@
 #include "spi.h"
 #include "usart.h"
 
-
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdio.h>
 #include <string.h>
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -58,7 +59,24 @@ static void MPU_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+/**
+ * @brief  Read a 16-bit register from the BMI323 over SPI.
+ *         The BMI323 SPI protocol requires one dummy byte after
+ *         the address byte before valid data begins.
+ * @param  reg   Register address to read
+ * @retval 16-bit register value (little-endian, LSB first)
+ */
+static uint16_t BMI323_ReadReg(uint8_t reg) {
+  uint8_t tx[3] = {reg | 0x80, 0x00, 0x00}; /* bit7=1 -> read */
+  uint8_t rx[3] = {0};
 
+  HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_RESET); /* CS low */
+  HAL_SPI_TransmitReceive(&hspi1, tx, rx, 3, HAL_MAX_DELAY);
+  HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_SET); /* CS high */
+
+  /* rx[0] = dummy, rx[1] = LSB, rx[2] = MSB */
+  return (uint16_t)(rx[1] | (rx[2] << 8));
+}
 /* USER CODE END 0 */
 
 /**
@@ -99,6 +117,13 @@ int main(void) {
   /* USER CODE BEGIN 2 */
   HAL_UART_Transmit(&huart1, (uint8_t *)"[FLARE] boot ok\r\n", 18,
                     HAL_MAX_DELAY);
+
+  /* BMI323 WHO_AM_I check - expected: 0x0043 */
+  uint16_t who_am_i = BMI323_ReadReg(0x00);
+  char msg[48];
+  int len = snprintf(msg, sizeof(msg), "[IMU] WHO_AM_I = 0x%04X %s\r\n",
+                     who_am_i, (who_am_i == 0x0043) ? "OK" : "FAIL");
+  HAL_UART_Transmit(&huart1, (uint8_t *)msg, len, HAL_MAX_DELAY);
   /* USER CODE END 2 */
 
   /* Infinite loop */
