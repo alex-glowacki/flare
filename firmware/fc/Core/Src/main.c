@@ -63,11 +63,11 @@ static void MPU_Config(void);
  * @brief  Read a 16-bit register from the BMI323 over SPI.
  *         The BMI323 SPI protocol requires one dummy byte after
  *         the address byte before valid data begins.
- * @param  reg   Register address to read
+ * @param  reg    Register address to read
  * @retval 16-bit register value (little-endian, LSB first)
  */
 static uint16_t BMI323_ReadReg(uint8_t reg) {
-  uint8_t tx[3] = {reg | 0x80, 0x00, 0x00}; /* bit7=1 -> read */
+  uint8_t tx[3] = {reg | 0x80, 0x00, 0x00}; /* bit7=1 → read */
   uint8_t rx[3] = {0};
 
   HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_RESET); /* CS low */
@@ -76,6 +76,16 @@ static uint16_t BMI323_ReadReg(uint8_t reg) {
 
   /* rx[0] = dummy, rx[1] = LSB, rx[2] = MSB */
   return (uint16_t)(rx[1] | (rx[2] << 8));
+}
+
+/**
+ * @brief  Send a string via ITM SWO for Cortex-Debug console output.
+ * @param  s    Null-terminated string to transmit
+ */
+static void ITM_Print(const char *s) {
+  while (*s) {
+    ITM_SendChar((uint32_t)*s++);
+  }
 }
 /* USER CODE END 0 */
 
@@ -115,15 +125,14 @@ int main(void) {
   MX_SPI1_Init();
 
   /* USER CODE BEGIN 2 */
-  HAL_UART_Transmit(&huart1, (uint8_t *)"[FLARE] boot ok\r\n", 18,
-                    HAL_MAX_DELAY);
+  ITM_Print("[FLARE] boot ok\r\n");
 
-  /* BMI323 WHO_AM_I check - expected: 0x0043 */
+  /* BMI323 WHO_AM_I check — expected: 0x0043 */
   uint16_t who_am_i = BMI323_ReadReg(0x00);
   char msg[48];
-  int len = snprintf(msg, sizeof(msg), "[IMU] WHO_AM_I = 0x%04X %s\r\n",
-                     who_am_i, (who_am_i == 0x0043) ? "OK" : "FAIL");
-  HAL_UART_Transmit(&huart1, (uint8_t *)msg, len, HAL_MAX_DELAY);
+  snprintf(msg, sizeof(msg), "[IMU] WHO_AM_I = 0x%04X %s\r\n", who_am_i,
+           (who_am_i == 0x0043) ? "OK" : "FAIL");
+  ITM_Print(msg);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -134,8 +143,8 @@ int main(void) {
     /* USER CODE BEGIN 3 */
 
     /* USER CODE END 3 */
-  } /* ← closes while(1) */
-} /* ← closes main() */
+  } /* closes while(1) */
+} /* closes main() */
 
 /**
  * @brief System Clock Configuration
