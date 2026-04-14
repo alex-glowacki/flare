@@ -47,7 +47,7 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+volatile uint16_t who_am_i_result = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -128,10 +128,10 @@ int main(void) {
   ITM_Print("[FLARE] boot ok\r\n");
 
   /* BMI323 WHO_AM_I check — expected: 0x0043 */
-  uint16_t who_am_i = BMI323_ReadReg(0x00);
+  who_am_i_result = BMI323_ReadReg(0x00);
   char msg[48];
-  snprintf(msg, sizeof(msg), "[IMU] WHO_AM_I = 0x%04X %s\r\n", who_am_i,
-           (who_am_i == 0x0043) ? "OK" : "FAIL");
+  snprintf(msg, sizeof(msg), "[IMU] WHO_AM_I = 0x%04X %s\r\n", who_am_i_result,
+           (who_am_i_result == 0x0043) ? "OK" : "FAIL");
   ITM_Print(msg);
   /* USER CODE END 2 */
 
