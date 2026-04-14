@@ -1,18 +1,22 @@
 {
-	"folders": [
-		{
-			"path": "."
-		},
-		{
-			"name": "esp32_quad",
-			"path": "firmware/esp32_quad"
-		},
-		{
-			"name": "esp32_remote",
-			"path": "firmware/esp32_remote"
-		}
-	],
-	"settings": {
-		"stm32cube-ide-clangd.path": "cube"
-	}
+  "folders": [
+    {
+      "path": ".",
+    },
+    {
+      "name": "esp32_quad",
+      "path": "firmware/esp32_quad",
+    },
+    {
+      "name": "esp32_remote",
+      "path": "firmware/esp32_remote",
+    },
+  ],
+  "settings": {
+    "stm32cube-ide-clangd.path": "cube",
+  },
+  "launch": {
+    "version": "0.2.0",
+    "configurations": [],
+  },
 }
