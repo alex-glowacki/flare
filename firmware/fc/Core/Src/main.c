@@ -39,12 +39,16 @@
 
 /* BMI323 register addresses */
 #define BMI323_REG_CHIP_ID 0x00
-#define BMI323_REG_ACC_DATA 0x03 /* Accel X LSB — burst read X/Y/Z from here \
-                                  */
-#define BMI323_REG_GYR_DATA 0x06 /* Gyro  X LSB — burst read X/Y/Z from here \
+#define BMI323_REG_ACC_DATA                                                    \
+  0x03 /* Accel X LSB — burst read X/Y/Z from here                           \
+        */
+#define BMI323_REG_GYR_DATA                                                    \
+  0x06                           /* Gyro  X LSB — burst read X/Y/Z from here \
                                   */
 #define BMI323_REG_ACC_CONF 0x20 /* Accel config: mode, ODR, range, BW */
 #define BMI323_REG_GYR_CONF 0x21 /* Gyro  config: mode, ODR, range, BW */
+#define BMI323_REG_CMD 0x7E      /* Command register - soft reset */
+#define BMI323_CMD_SOFT_RESET 0xDEAF /* Soft reset command */
 
 /*
  * ACC_CONF / GYR_CONF bit fields (combined 16-bit value written via WriteReg):
@@ -60,8 +64,8 @@
  * Using ±2g / ±125 dps for initial bring-up — tightest range, easiest to
  * verify sensor is responding. Widen after calibration in Phase 3.
  */
-#define BMI323_ACC_CONF_VAL 0x0408
-#define BMI323_GYR_CONF_VAL 0x0408
+#define BMI323_ACC_CONF_VAL 0x4008
+#define BMI323_GYR_CONF_VAL 0x4008
 
 /* USER CODE END PD */
 
@@ -74,6 +78,9 @@
 
 /* USER CODE BEGIN PV */
 volatile uint16_t who_am_i_result = 0;
+volatile uint16_t acc_conf_readback = 0; /* ACC_CONF register readback */
+volatile uint16_t gyr_conf_readback = 0; /* GYR_CONF register readback */
+volatile uint16_t acc_conf_default = 0;  /* ACC_CONF before any write */
 
 /* Raw accel counts — signed 16-bit, updated every loop iteration */
 volatile int16_t imu_acc_x = 0;
@@ -105,15 +112,16 @@ static void MPU_Config(void);
  * @retval 16-bit register value (little-endian, LSB first)
  */
 static uint16_t BMI323_ReadReg(uint8_t reg) {
-  uint8_t tx[3] = {reg | 0x80, 0x00, 0x00}; /* bit7=1 → read */
-  uint8_t rx[3] = {0};
+  uint8_t tx[3] = {reg | 0x80, 0x00, 0x00};
+  uint8_t rx[3];
+  memset(rx, 0, sizeof(rx)); /* ensure no stale data */
 
-  HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_RESET); /* CS low  */
+  HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_RESET);
   HAL_SPI_TransmitReceive(&hspi1, tx, rx, 3, HAL_MAX_DELAY);
-  HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_SET); /* CS high */
+  HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_SET);
 
-  /* rx[0] = dummy, rx[1] = LSB, rx[2] = MSB */
-  return (uint16_t)(rx[1] | (rx[2] << 8));
+  /* rx[0]=dummy, rx[1]=MSB, rx[2]=LSB */
+  return (uint16_t)((rx[1] << 8) | rx[2]);
 }
 
 /**
@@ -125,14 +133,15 @@ static uint16_t BMI323_ReadReg(uint8_t reg) {
  */
 static void BMI323_WriteReg(uint8_t reg, uint16_t val) {
   uint8_t tx[3] = {
-      reg & 0x7F,                  /* bit7=0 → write */
-      (uint8_t)(val & 0xFF),       /* LSB */
-      (uint8_t)((val >> 8) & 0xFF) /* MSB */
+      reg & 0x7F,                   /* bit7=0 → write */
+      (uint8_t)((val >> 8) & 0xFF), /* MSB first */
+      (uint8_t)(val & 0xFF)         /* LSB second */
   };
+  uint8_t rx[3] = {0};
 
-  HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_RESET); /* CS low  */
-  HAL_SPI_Transmit(&hspi1, tx, 3, HAL_MAX_DELAY);
-  HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_SET); /* CS high */
+  HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_RESET);
+  HAL_SPI_TransmitReceive(&hspi1, tx, rx, 3, HAL_MAX_DELAY);
+  HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_SET);
 }
 
 /**
@@ -176,11 +185,30 @@ static void BMI323_BurstRead(uint8_t reg, int16_t *out, uint8_t count) {
  * @retval 0 on success, 1 if WHO_AM_I check fails
  */
 static uint8_t BMI323_Init(void) {
+  HAL_Delay(10); /* wait for BMI323 power-on reset to complete */
+
+  /*
+   * Issue a soft reset before any configuration.
+   * Required to put the sensor into a known state.
+   * CMD register = 0x7E, value = 0xDEAF.
+   * Datasheet section 5.17: 1.5ms delay required after reset.
+   */
+  BMI323_WriteReg(BMI323_REG_CMD, BMI323_CMD_SOFT_RESET);
+  HAL_Delay(50); /* increased from 2ms - give reset plenty of time */
+
+  /* Dummy read to switch interface back to SPI mode after reset */
+  BMI323_ReadReg(BMI323_REG_CHIP_ID);
+  HAL_Delay(10); /* increased from 1ms */
+
   /* Verify WHO_AM_I before touching config registers */
   who_am_i_result = BMI323_ReadReg(BMI323_REG_CHIP_ID);
   if (who_am_i_result != 0x0043) {
     return 1; /* comms failure — do not proceed */
   }
+
+  /* Read ACC_CONF before touching it - should be 0x0028 (suspend mode default)
+   */
+  acc_conf_default = BMI323_ReadReg(BMI323_REG_ACC_CONF);
 
   /*
    * On power-up, accel and gyro are in suspend mode.
@@ -188,10 +216,14 @@ static uint8_t BMI323_Init(void) {
    * Allow 2ms after each write for the sensor to transition.
    */
   BMI323_WriteReg(BMI323_REG_ACC_CONF, BMI323_ACC_CONF_VAL);
-  HAL_Delay(2);
+  HAL_Delay(10);
+  acc_conf_readback =
+      BMI323_ReadReg(BMI323_REG_ACC_CONF); /* verify write landed */
 
   BMI323_WriteReg(BMI323_REG_GYR_CONF, BMI323_GYR_CONF_VAL);
-  HAL_Delay(2);
+  HAL_Delay(10);
+  gyr_conf_readback =
+      BMI323_ReadReg(BMI323_REG_GYR_CONF); /* verify write landed */
 
   return 0; /* success */
 }
@@ -266,7 +298,6 @@ int main(void) {
   MX_GPIO_Init();
   MX_USART1_UART_Init();
   MX_SPI1_Init();
-
   /* USER CODE BEGIN 2 */
   ITM_Print("[FLARE] boot ok\r\n");
 
@@ -290,27 +321,9 @@ int main(void) {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-
-    BMI323_ReadAccel();
-    BMI323_ReadGyro();
-
-    /*
-     * TODO (CP2102 arrives): replace ITM_Print block below with:
-     *
-     *   snprintf(msg, sizeof(msg),
-     *     "A:%d,%d,%d G:%d,%d,%d\r\n",
-     *     imu_acc_x, imu_acc_y, imu_acc_z,
-     *     imu_gyr_x, imu_gyr_y, imu_gyr_z);
-     *   HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
-     */
-    snprintf(msg, sizeof(msg), "A:%d,%d,%d G:%d,%d,%d\r\n", imu_acc_x,
-             imu_acc_y, imu_acc_z, imu_gyr_x, imu_gyr_y, imu_gyr_z);
-    ITM_Print(msg);
-
-    HAL_Delay(10); /* ~100 Hz */
-
-  } /* closes while(1) */
-} /* closes main() */
+  }
+  /* USER CODE END 3 */
+}
 
 /**
  * @brief System Clock Configuration
@@ -320,17 +333,20 @@ void SystemClock_Config(void) {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Supply configuration update enable */
+  /** Supply configuration update enable
+   */
   HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
 
-  /** Configure the main internal regulator output voltage */
+  /** Configure the main internal regulator output voltage
+   */
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
   while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {
   }
 
   /** Initializes the RCC Oscillators according to the specified parameters
-   * in the RCC_OscInitTypeDef structure. */
+   * in the RCC_OscInitTypeDef structure.
+   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
   RCC_OscInitStruct.HSICalibrationValue = 64;
@@ -348,7 +364,8 @@ void SystemClock_Config(void) {
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks */
+  /** Initializes the CPU, AHB and APB buses clocks
+   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
                                 RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2 |
                                 RCC_CLOCKTYPE_D3PCLK1 | RCC_CLOCKTYPE_D1PCLK1;
@@ -370,13 +387,15 @@ void SystemClock_Config(void) {
 /* USER CODE END 4 */
 
 /* MPU Configuration */
+
 void MPU_Config(void) {
   MPU_Region_InitTypeDef MPU_InitStruct = {0};
 
   /* Disables the MPU */
   HAL_MPU_Disable();
 
-  /** Initializes and configures the Region and the memory to be protected */
+  /** Initializes and configures the Region and the memory to be protected
+   */
   MPU_InitStruct.Enable = MPU_REGION_ENABLE;
   MPU_InitStruct.Number = MPU_REGION_NUMBER0;
   MPU_InitStruct.BaseAddress = 0x0;
@@ -390,7 +409,6 @@ void MPU_Config(void) {
   MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
 
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
-
   /* Enables the MPU */
   HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 }
@@ -406,7 +424,6 @@ void Error_Handler(void) {
   }
   /* USER CODE END Error_Handler_Debug */
 }
-
 #ifdef USE_FULL_ASSERT
 /**
  * @brief  Reports the name of the source file and the source line number
