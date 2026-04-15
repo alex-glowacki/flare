@@ -37,6 +37,32 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+/* BMI323 register addresses */
+#define BMI323_REG_CHIP_ID 0x00
+#define BMI323_REG_ACC_DATA 0x03 /* Accel X LSB — burst read X/Y/Z from here \
+                                  */
+#define BMI323_REG_GYR_DATA 0x06 /* Gyro  X LSB — burst read X/Y/Z from here \
+                                  */
+#define BMI323_REG_ACC_CONF 0x20 /* Accel config: mode, ODR, range, BW */
+#define BMI323_REG_GYR_CONF 0x21 /* Gyro  config: mode, ODR, range, BW */
+
+/*
+ * ACC_CONF / GYR_CONF bit fields (combined 16-bit value written via WriteReg):
+ *
+ *   Bits [3:0]  ODR   — 0x08 = 100 Hz
+ *   Bits [6:4]  Range — accel: 0x0 = ±2g  | gyro: 0x0 = ±125 dps
+ *   Bits [11:8] Mode  — 0x4  = continuous (normal) mode
+ *
+ * Full value = (mode << 8) | (range << 4) | odr
+ *            = (0x4 << 8) | (0x0 << 4) | 0x8
+ *            = 0x0408
+ *
+ * Using ±2g / ±125 dps for initial bring-up — tightest range, easiest to
+ * verify sensor is responding. Widen after calibration in Phase 3.
+ */
+#define BMI323_ACC_CONF_VAL 0x0408
+#define BMI323_GYR_CONF_VAL 0x0408
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -48,6 +74,17 @@
 
 /* USER CODE BEGIN PV */
 volatile uint16_t who_am_i_result = 0;
+
+/* Raw accel counts — signed 16-bit, updated every loop iteration */
+volatile int16_t imu_acc_x = 0;
+volatile int16_t imu_acc_y = 0;
+volatile int16_t imu_acc_z = 0;
+
+/* Raw gyro counts — signed 16-bit, updated every loop iteration */
+volatile int16_t imu_gyr_x = 0;
+volatile int16_t imu_gyr_y = 0;
+volatile int16_t imu_gyr_z = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -59,6 +96,7 @@ static void MPU_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
 /**
  * @brief  Read a 16-bit register from the BMI323 over SPI.
  *         The BMI323 SPI protocol requires one dummy byte after
@@ -70,12 +108,116 @@ static uint16_t BMI323_ReadReg(uint8_t reg) {
   uint8_t tx[3] = {reg | 0x80, 0x00, 0x00}; /* bit7=1 → read */
   uint8_t rx[3] = {0};
 
-  HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_RESET); /* CS low */
+  HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_RESET); /* CS low  */
   HAL_SPI_TransmitReceive(&hspi1, tx, rx, 3, HAL_MAX_DELAY);
   HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_SET); /* CS high */
 
   /* rx[0] = dummy, rx[1] = LSB, rx[2] = MSB */
   return (uint16_t)(rx[1] | (rx[2] << 8));
+}
+
+/**
+ * @brief  Write a 16-bit value to a BMI323 register over SPI.
+ *         The BMI323 accepts: [addr_byte] [LSB] [MSB]
+ *         (no dummy byte on writes — dummy byte is read-only protocol)
+ * @param  reg    Register address to write
+ * @param  val    16-bit value to write (LSB first)
+ */
+static void BMI323_WriteReg(uint8_t reg, uint16_t val) {
+  uint8_t tx[3] = {
+      reg & 0x7F,                  /* bit7=0 → write */
+      (uint8_t)(val & 0xFF),       /* LSB */
+      (uint8_t)((val >> 8) & 0xFF) /* MSB */
+  };
+
+  HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_RESET); /* CS low  */
+  HAL_SPI_Transmit(&hspi1, tx, 3, HAL_MAX_DELAY);
+  HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_SET); /* CS high */
+}
+
+/**
+ * @brief  Burst-read N consecutive 16-bit registers from the BMI323.
+ *         Used to read accel (X/Y/Z) and gyro (X/Y/Z) data in one transaction.
+ *
+ *         Protocol: [addr|0x80] [dummy] [D0_LSB D0_MSB D1_LSB D1_MSB ...]
+ *
+ * @param  reg      Starting register address
+ * @param  out      Output array of int16_t — length must be >= count
+ * @param  count    Number of 16-bit words to read
+ */
+static void BMI323_BurstRead(uint8_t reg, int16_t *out, uint8_t count) {
+  /*
+   * Total SPI bytes:
+   *   1 address byte + 1 dummy byte + (count * 2 data bytes)
+   */
+  uint8_t tx_len = 2 + (count * 2);
+  uint8_t tx[14] = {0}; /* max: 2 + 6*2 = 14 for a 6-word burst */
+  uint8_t rx[14] = {0};
+
+  tx[0] = reg | 0x80; /* read flag */
+  /* tx[1..n] stay 0x00 — dummy + clocking out data */
+
+  HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_RESET);
+  HAL_SPI_TransmitReceive(&hspi1, tx, rx, tx_len, HAL_MAX_DELAY);
+  HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_SET);
+
+  /* rx[0] = addr echo (discard), rx[1] = dummy (discard)
+   * rx[2], rx[3] = word 0 LSB, MSB
+   * rx[4], rx[5] = word 1 LSB, MSB  ... etc */
+  for (uint8_t i = 0; i < count; i++) {
+    uint8_t base = 2 + (i * 2);
+    out[i] = (int16_t)(rx[base] | (rx[base + 1] << 8));
+  }
+}
+
+/**
+ * @brief  Initialize the BMI323 — activate accel and gyro at 100Hz.
+ *         Must be called after SPI is initialized and before any data reads.
+ * @retval 0 on success, 1 if WHO_AM_I check fails
+ */
+static uint8_t BMI323_Init(void) {
+  /* Verify WHO_AM_I before touching config registers */
+  who_am_i_result = BMI323_ReadReg(BMI323_REG_CHIP_ID);
+  if (who_am_i_result != 0x0043) {
+    return 1; /* comms failure — do not proceed */
+  }
+
+  /*
+   * On power-up, accel and gyro are in suspend mode.
+   * Writing ACC_CONF and GYR_CONF with a valid mode field activates them.
+   * Allow 2ms after each write for the sensor to transition.
+   */
+  BMI323_WriteReg(BMI323_REG_ACC_CONF, BMI323_ACC_CONF_VAL);
+  HAL_Delay(2);
+
+  BMI323_WriteReg(BMI323_REG_GYR_CONF, BMI323_GYR_CONF_VAL);
+  HAL_Delay(2);
+
+  return 0; /* success */
+}
+
+/**
+ * @brief  Read raw accel X, Y, Z from BMI323 into global imu_acc_* variables.
+ *         Uses burst read for efficiency (single CS transaction).
+ */
+static void BMI323_ReadAccel(void) {
+  int16_t buf[3];
+  BMI323_BurstRead(BMI323_REG_ACC_DATA, buf, 3);
+  imu_acc_x = buf[0];
+  imu_acc_y = buf[1];
+  imu_acc_z = buf[2];
+}
+
+/**
+ * @brief  Read raw gyro X, Y, Z from BMI323 into global imu_gyr_* variables.
+ *         Uses burst read for efficiency (single CS transaction).
+ */
+static void BMI323_ReadGyro(void) {
+  int16_t buf[3];
+  BMI323_BurstRead(BMI323_REG_GYR_DATA, buf, 3);
+  imu_gyr_x = buf[0];
+  imu_gyr_y = buf[1];
+  imu_gyr_z = buf[2];
 }
 
 /**
@@ -87,6 +229,7 @@ static void ITM_Print(const char *s) {
     ITM_SendChar((uint32_t)*s++);
   }
 }
+
 /* USER CODE END 0 */
 
 /**
@@ -127,12 +270,18 @@ int main(void) {
   /* USER CODE BEGIN 2 */
   ITM_Print("[FLARE] boot ok\r\n");
 
-  /* BMI323 WHO_AM_I check — expected: 0x0043 */
-  who_am_i_result = BMI323_ReadReg(0x00);
-  char msg[48];
-  snprintf(msg, sizeof(msg), "[IMU] WHO_AM_I = 0x%04X %s\r\n", who_am_i_result,
-           (who_am_i_result == 0x0043) ? "OK" : "FAIL");
+  /* BMI323 init — activates accel + gyro, verifies WHO_AM_I */
+  if (BMI323_Init() != 0) {
+    ITM_Print("[IMU] INIT FAILED — WHO_AM_I mismatch\r\n");
+    Error_Handler();
+  }
+
+  char msg[64];
+  snprintf(msg, sizeof(msg),
+           "[IMU] WHO_AM_I = 0x%04X OK — accel+gyro active\r\n",
+           who_am_i_result);
   ITM_Print(msg);
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -142,7 +291,24 @@ int main(void) {
 
     /* USER CODE BEGIN 3 */
 
-    /* USER CODE END 3 */
+    BMI323_ReadAccel();
+    BMI323_ReadGyro();
+
+    /*
+     * TODO (CP2102 arrives): replace ITM_Print block below with:
+     *
+     *   snprintf(msg, sizeof(msg),
+     *     "A:%d,%d,%d G:%d,%d,%d\r\n",
+     *     imu_acc_x, imu_acc_y, imu_acc_z,
+     *     imu_gyr_x, imu_gyr_y, imu_gyr_z);
+     *   HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+     */
+    snprintf(msg, sizeof(msg), "A:%d,%d,%d G:%d,%d,%d\r\n", imu_acc_x,
+             imu_acc_y, imu_acc_z, imu_gyr_x, imu_gyr_y, imu_gyr_z);
+    ITM_Print(msg);
+
+    HAL_Delay(10); /* ~100 Hz */
+
   } /* closes while(1) */
 } /* closes main() */
 
@@ -154,20 +320,17 @@ void SystemClock_Config(void) {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Supply configuration update enable
-   */
+  /** Supply configuration update enable */
   HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
 
-  /** Configure the main internal regulator output voltage
-   */
+  /** Configure the main internal regulator output voltage */
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
   while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {
   }
 
   /** Initializes the RCC Oscillators according to the specified parameters
-   * in the RCC_OscInitTypeDef structure.
-   */
+   * in the RCC_OscInitTypeDef structure. */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
   RCC_OscInitStruct.HSICalibrationValue = 64;
@@ -185,8 +348,7 @@ void SystemClock_Config(void) {
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-   */
+  /** Initializes the CPU, AHB and APB buses clocks */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
                                 RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2 |
                                 RCC_CLOCKTYPE_D3PCLK1 | RCC_CLOCKTYPE_D1PCLK1;
@@ -208,15 +370,13 @@ void SystemClock_Config(void) {
 /* USER CODE END 4 */
 
 /* MPU Configuration */
-
 void MPU_Config(void) {
   MPU_Region_InitTypeDef MPU_InitStruct = {0};
 
   /* Disables the MPU */
   HAL_MPU_Disable();
 
-  /** Initializes and configures the Region and the memory to be protected
-   */
+  /** Initializes and configures the Region and the memory to be protected */
   MPU_InitStruct.Enable = MPU_REGION_ENABLE;
   MPU_InitStruct.Number = MPU_REGION_NUMBER0;
   MPU_InitStruct.BaseAddress = 0x0;
@@ -230,6 +390,7 @@ void MPU_Config(void) {
   MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
 
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
+
   /* Enables the MPU */
   HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 }
