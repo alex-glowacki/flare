@@ -408,7 +408,17 @@ int main(void) {
   FLARE_Init();
   UART_Print("[FLARE] PID controller ready\r\n");
 
-  UART_Print("[IMU] starting 100Hz loop\r\n");
+  /* ── BENCH TEST — props off, verify motor spin direction ── */
+  UART_Print("[TEST] spooling all motors to throttle 100...\r\n");
+  FLARE_SetThrottle(100);
+  FLARE_SetArmed(1);
+  HAL_Delay(3000);
+  FLARE_SetArmed(0);
+  FLARE_SetThrottle(0);
+  UART_Print("[TEST] bench test complete - disarmed\r\n");
+  /* ── END BENCH TEST ──────────────────────────────────────── */
+
+  // UART_Print("[IMU] starting 100Hz loop\r\n");
 
   /* USER CODE END 2 */
 

@@ -3,7 +3,6 @@
 #include "pid.h"
 #include <stdint.h>
 
-
 static FLARE_State state;
 static PID_Controller pid_roll;
 static PID_Controller pid_pitch;
@@ -26,7 +25,7 @@ void FLARE_Init(void) {
   state.armed = 0;
 
   /*
-   * Initial PID gains - these WILL need tuning.
+   * Initial PID gains — these WILL need tuning.
    * Start conservative: low P, no I, small D.
    * kp, ki, kd, integral_limit, output_limit
    */
@@ -51,10 +50,10 @@ void FLARE_Update(float roll, float pitch, float gx, float gy, float gz,
 
   /*
    * X-frame motor mixing:
-   * M1 Front-Left = throttle + roll - pitch - yaw
+   * M1 Front-Left  = throttle + roll - pitch - yaw
    * M2 Front-Right = throttle - roll - pitch + yaw
-   * M3 Rear-Right = throttle - roll + pitch - yaw
-   * M4 Rear-Left = throttle + roll + pitch + yaw
+   * M3 Rear-Right  = throttle - roll + pitch - yaw
+   * M4 Rear-Left   = throttle + roll + pitch + yaw
    */
   float t = (float)state.throttle;
 
@@ -63,7 +62,6 @@ void FLARE_Update(float roll, float pitch, float gx, float gy, float gz,
   float m3 = t - out_roll + out_pitch - out_yaw;
   float m4 = t + out_roll + out_pitch + out_yaw;
 
-  /* Clamp to valid armed DSHOT range */
   uint16_t m1_cmd = (uint16_t)clamp(m1, 48.0f, 2047.0f);
   uint16_t m2_cmd = (uint16_t)clamp(m2, 48.0f, 2047.0f);
   uint16_t m3_cmd = (uint16_t)clamp(m3, 48.0f, 2047.0f);
@@ -71,3 +69,16 @@ void FLARE_Update(float roll, float pitch, float gx, float gy, float gz,
 
   DSHOT_SendThrottle(m1_cmd, m2_cmd, m3_cmd, m4_cmd);
 }
+
+/* ── Arming and throttle control ─────────────────────────────────────────── */
+
+void FLARE_SetArmed(uint8_t armed) {
+  state.armed = armed;
+  if (!armed) {
+    PID_Reset(&pid_roll);
+    PID_Reset(&pid_pitch);
+    PID_Reset(&pid_yaw);
+  }
+}
+
+void FLARE_SetThrottle(uint16_t throttle) { state.throttle = throttle; }
