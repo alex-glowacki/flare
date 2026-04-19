@@ -425,8 +425,12 @@ int main(void) {
     IMU_Fusion_Update(&imu_fusion, imu_acc_x, imu_acc_y, imu_acc_z, imu_gyr_x,
                       imu_gyr_y, imu_gyr_z, 0.01f, 0.96f);
 
-    FLARE_Update(imu_fusion.roll, imu_fusion.pitch, imu_gyr_x, imu_gyr_y,
-                 imu_gyr_z, 0.01f);
+    float gx_dps = imu_gyr_x / 16.384f;
+    float gy_dps = imu_gyr_y / 16.384f;
+    float gz_dps = imu_gyr_z / 16.384f;
+
+    FLARE_Update(imu_fusion.roll, imu_fusion.pitch, gx_dps, gy_dps, gz_dps,
+                 0.01f);
 
     snprintf(msg, sizeof(msg),
              "A:%6d %6d %6d  G:%6d %6d %6d  R:%7.2f  P:%7.2f\r\n", imu_acc_x,
