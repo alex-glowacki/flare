@@ -16,15 +16,17 @@
  ******************************************************************************
  */
 /* USER CODE END Header */
-
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "dma.h"
 #include "gpio.h"
 #include "spi.h"
+#include "tim.h"
 #include "usart.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "dshot.h"
 #include "imu_fusion.h"
 #include <stdio.h>
 #include <string.h>
@@ -112,6 +114,7 @@ IMU_Fusion_t imu_fusion;
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
+static void MPU_Config(void);
 /* USER CODE BEGIN PFP */
 /* USER CODE END PFP */
 
@@ -264,8 +267,7 @@ static uint8_t BMI323_InitFeatureEngine(void) {
 static uint8_t BMI323_Init(void) {
   HAL_Delay(10);
 
-  /* Soft reset — BMI323 resets mid-transaction so use a short timeout.
-   * The peripheral is re-initialized after the reset delay. */
+  /* Soft reset */
   uint8_t rst_tx[3] = {BMI323_REG_CMD & 0x7F, 0xAF, 0xDE};
   uint8_t rst_rx[3] = {0};
   SPI1_FlushRxFifo();
@@ -275,20 +277,19 @@ static uint8_t BMI323_Init(void) {
 
   HAL_Delay(50);
 
-  /* Re-initialize SPI peripheral — clears any state from aborted reset */
+  /* Re-initialize SPI peripheral */
   HAL_SPI_DeInit(&hspi1);
   HAL_Delay(1);
   MX_SPI1_Init();
   HAL_Delay(1);
 
-  /* Dummy read — switches BMI323 from I2C to SPI mode post-reset */
+  /* Dummy reads — switches BMI323 from I2C to SPI mode post-reset */
   BMI323_ReadReg(BMI323_REG_CHIP_ID);
   HAL_Delay(50);
   BMI323_ReadReg(BMI323_REG_CHIP_ID);
   HAL_Delay(10);
 
-  /* Verify WHO_AM_I — low byte must be 0x43, high byte is garbage for
-   * 1-byte registers and is masked out */
+  /* Verify WHO_AM_I */
   who_am_i_result = BMI323_ReadReg(BMI323_REG_CHIP_ID);
   if ((who_am_i_result & 0x00FF) != 0x43) {
     return 1;
@@ -338,20 +339,27 @@ int main(void) {
   /* USER CODE BEGIN 1 */
   /* USER CODE END 1 */
 
+  /* MPU Configuration -------------------------------------------------------*/
+  MPU_Config();
+
   /* MCU Configuration -------------------------------------------------------*/
   HAL_Init();
 
   /* USER CODE BEGIN Init */
   /* USER CODE END Init */
 
+  /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
   /* USER CODE END SysInit */
 
+  /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_USART1_UART_Init();
   MX_SPI1_Init();
+  MX_TIM4_Init();
 
   /* USER CODE BEGIN 2 */
 
@@ -387,10 +395,21 @@ int main(void) {
   IMU_Fusion_Init(&imu_fusion);
   UART_Print("[FUSION] complementary filter ready\r\n");
 
+  DSHOT_Init();
+  UART_Print("[DSHOT] driver ready\r\n");
+
+  /* Send zero throttle for 1 second — arms BLHeli_S ESCs */
+  for (int i = 0; i < 100; i++) {
+    DSHOT_SendThrottle(0, 0, 0, 0);
+    HAL_Delay(10);
+  }
+  UART_Print("[DSHOT] ESCs armed\r\n");
+
   UART_Print("[IMU] starting 100Hz loop\r\n");
 
   /* USER CODE END 2 */
 
+  /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1) {
     /* USER CODE END WHILE */
@@ -413,10 +432,14 @@ int main(void) {
 
     /* USER CODE END 3 */
   }
+  /* main() closes here — functions below are at file scope */
 }
 
+/* USER CODE BEGIN 4 */
+/* USER CODE END 4 */
+
 /**
- * @brief  System Clock Configuration
+ * @brief System Clock Configuration
  * @retval None
  */
 void SystemClock_Config(void) {
@@ -425,12 +448,13 @@ void SystemClock_Config(void) {
 
   HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+
   while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {
   }
 
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.HSICalibrationValue = 64;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
   RCC_OscInitStruct.PLL.PLLM = 4;
@@ -451,28 +475,52 @@ void SystemClock_Config(void) {
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
-  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV1;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV1;
-  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV1;
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK) {
+  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV2;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
+  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV2;
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK) {
     Error_Handler();
   }
 }
 
-/* USER CODE BEGIN 4 */
-/* USER CODE END 4 */
+/* MPU Configuration */
+void MPU_Config(void) {
+  MPU_Region_InitTypeDef MPU_InitStruct = {0};
+
+  HAL_MPU_Disable();
+
+  MPU_InitStruct.Enable = MPU_REGION_ENABLE;
+  MPU_InitStruct.Number = MPU_REGION_NUMBER0;
+  MPU_InitStruct.BaseAddress = 0x0;
+  MPU_InitStruct.Size = MPU_REGION_SIZE_4GB;
+  MPU_InitStruct.SubRegionDisable = 0x87;
+  MPU_InitStruct.TypeExtField = MPU_TEX_LEVEL0;
+  MPU_InitStruct.AccessPermission = MPU_REGION_NO_ACCESS;
+  MPU_InitStruct.DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE;
+  MPU_InitStruct.IsShareable = MPU_ACCESS_SHAREABLE;
+  MPU_InitStruct.IsCacheable = MPU_ACCESS_NOT_CACHEABLE;
+  MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
+
+  HAL_MPU_ConfigRegion(&MPU_InitStruct);
+  HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
+}
 
 /**
- * @brief  Error handler — halts execution.
+ * @brief  This function is executed in case of error occurrence.
  * @retval None
  */
 void Error_Handler(void) {
+  /* USER CODE BEGIN Error_Handler_Debug */
   __disable_irq();
   while (1) {
   }
+  /* USER CODE END Error_Handler_Debug */
 }
 
 #ifdef USE_FULL_ASSERT
-void assert_failed(uint8_t *file, uint32_t line) {}
+void assert_failed(uint8_t *file, uint32_t line) {
+  /* USER CODE BEGIN 6 */
+  /* USER CODE END 6 */
+}
 #endif /* USE_FULL_ASSERT */
