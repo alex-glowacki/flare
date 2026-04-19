@@ -23,9 +23,9 @@
 #include "spi.h"
 #include "usart.h"
 
-
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "imu_fusion.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -105,6 +105,8 @@ volatile int16_t imu_acc_z = 0;
 volatile int16_t imu_gyr_x = 0;
 volatile int16_t imu_gyr_y = 0;
 volatile int16_t imu_gyr_z = 0;
+
+IMU_Fusion_t imu_fusion;
 
 /* USER CODE END PV */
 
@@ -382,6 +384,9 @@ int main(void) {
            gyr_conf_readback);
   UART_Print(msg);
 
+  IMU_Fusion_Init(&imu_fusion);
+  UART_Print("[FUSION] complementary filter ready\r\n");
+
   UART_Print("[IMU] starting 100Hz loop\r\n");
 
   /* USER CODE END 2 */
@@ -395,13 +400,19 @@ int main(void) {
     BMI323_ReadAccel();
     BMI323_ReadGyro();
 
-    snprintf(msg, sizeof(msg), "A:%6d %6d %6d  G:%6d %6d %6d\r\n", imu_acc_x,
-             imu_acc_y, imu_acc_z, imu_gyr_x, imu_gyr_y, imu_gyr_z);
+    IMU_Fusion_Update(&imu_fusion, imu_acc_x, imu_acc_y, imu_acc_z, imu_gyr_x,
+                      imu_gyr_y, imu_gyr_z, 0.01f, 0.96f);
+
+    snprintf(msg, sizeof(msg),
+             "A:%6d %6d %6d  G:%6d %6d %6d  R:%7.2f  P:%7.2f\r\n", imu_acc_x,
+             imu_acc_y, imu_acc_z, imu_gyr_x, imu_gyr_y, imu_gyr_z,
+             imu_fusion.roll, imu_fusion.pitch);
     UART_Print(msg);
 
     HAL_Delay(IMU_LOOP_INTERVAL_MS);
+
+    /* USER CODE END 3 */
   }
-  /* USER CODE END 3 */
 }
 
 /**
