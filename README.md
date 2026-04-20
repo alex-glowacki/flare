@@ -9,15 +9,16 @@ systems learning project.
 
 ## Project Status
 
-| Phase | Goal | Status |
-|---|---|---|
-| 1 | STM32H7 bring-up — blink, UART, toolchain         | ✅ Done |
-| 2 | IMU bring-up — BMI323, sensor fusion              | ✅ Done |
-| 3 | PID loop — stabilization, DSHOT motor output      | 🔲      |
-| 4 | RC link — ESP-NOW, channel parsing, arming        | 🔲      |
-| 5 | Remote firmware — sticks, OLED, switches          | 🔲      |
-| 6 | Flight testing & tuning                           | 🔲      |
-| 7 | *(Future)* LiDAR mapping — RPLiDAR + Pi companion | 🔲      |
+| Phase | Goal                                              | Status |
+|-------|---------------------------------------------------|--------|
+| 1     | STM32H7 bring-up — blink, UART, toolchain         | ✅ Done |
+| 2     | IMU bring-up — BMI323, sensor fusion              | ✅ Done |
+| 2.5   | Magnetometer — QMC5883L, yaw fusion               | ✅ Done |
+| 3     | PID loop — stabilization, DSHOT motor output      | 🔄 Blocked (ESC config) |
+| 4     | RC link — ESP-NOW, channel parsing, arming        | 🔲      |
+| 5     | Remote firmware — sticks, OLED, switches          | 🔲      |
+| 6     | Flight testing & tuning                           | 🔲      |
+| 7     | *(Future)* LiDAR mapping — RPLiDAR + Pi companion | 🔲      |
 
 ---
 
@@ -27,26 +28,42 @@ systems learning project.
 - Custom PETG-CF printed, F450-class (450mm), self-modeled
 
 ### Flight Controller — FK723M1-ZGT6
-- MCU: STM32H723ZGT6 (Cortex-M7, 550MHz)
+- MCU: STM32H723ZGT6 (Cortex-M7, 96 MHz)
 - SPI1: PA5=SCK, PA6=MISO, PA7=MOSI
+- I2C1: PB6=SCL, PB7=SDA
 - CS (IMU): PB0
 - INT1 (IMU): PB1
 - USART1: PA9=TX, PA10=RX
+- TIM4 DSHOT: PD12=M1, PD13=M2, PD14=M3, PD15=M4
 - LED: PG7 (LED_USER)
 
 ### IMU — BMI323 (Arvian breakout, B0FG2ZFHNM)
+
 | Wire color | Signal | Pin |
-|---|---|---|
-| Orange | CSB | PB0 |
-| Brown | SCX | PA5 |
-| Blue | SDX | PA7 |
-| Green | SDO | PA6 |
-| Purple | INT1 | PB1 |
-| White | VDD | 3V3 |
-| Gray | GND | GND |
+|------------|--------|-----|
+| Orange     | CSB    | PB0 |
+| Brown      | SCX    | PA5 |
+| Blue       | SDX    | PA7 |
+| Green      | SDO    | PA6 |
+| Purple     | INT1   | PB1 |
+| White      | VDD    | 3V3 |
+| Gray       | GND    | GND |
+
+### Magnetometer — QMC5883L (FORIOT GY-271, B0CFLPKTP1)
+
+| Wire color | Signal | Pin |
+|------------|--------|-----|
+| Yellow     | SCL    | PB6 |
+| Green      | SDA    | PB7 |
+| Orange     | VCC    | 3V3 |
+| Brown      | GND    | GND |
+
+- I2C address: `0x2C` (ADDR pin pulled high on module — not the typical `0x0D`)
+- Calibration not yet performed — hard-iron offsets are zero
 
 ### ESCs
-- BLHeli_S (4×)
+- Readytosky 35A BLHeli_S (4×)
+- Startup power not yet configured — awaiting ATmega328P Nano
 
 ### Power Distribution
 - QWinOut PDB with built-in 5V and 12V BECs
@@ -70,10 +87,15 @@ flare/
 │   │   ├── Core/
 │   │   │   ├── Inc/
 │   │   │   │   ├── main.h
-│   │   │   │   └── imu_fusion.h   # Complementary filter API
+│   │   │   │   ├── imu_fusion.h   # Complementary filter API
+│   │   │   │   └── mag.h          # QMC5883L magnetometer driver API
 │   │   │   └── Src/
-│   │   │       ├── main.c         # IMU init, 100Hz loop, UART output
-│   │   │       └── imu_fusion.c   # Complementary filter implementation
+│   │   │       ├── main.c         # Boot sequence, 100Hz loop, UART output
+│   │   │       ├── imu_fusion.c   # Complementary filter (roll, pitch, yaw)
+│   │   │       ├── mag.c          # QMC5883L I2C driver
+│   │   │       ├── dshot.c        # DSHOT300 DMA output
+│   │   │       ├── pid.c          # PID controller
+│   │   │       └── flare.c        # Motor mixing, arming logic
 │   │   ├── cmake/stm32cubemx/     # CubeMX-generated CMake support
 │   │   ├── CMakeLists.txt
 │   │   └── build/Debug/           # Build output (gitignored)
@@ -87,14 +109,14 @@ flare/
 
 ## Toolchain
 
-| Tool | Version |
-|---|---|
-| arm-none-eabi-gcc | 15.2.1 |
-| CMake | 4.3.1 |
-| Ninja | 1.13.2 |
+| Tool                | Version |
+|---------------------|---------|
+| arm-none-eabi-gcc   | 15.2.1  |
+| CMake               | 4.3.1   |
+| Ninja               | 1.13.2  |
 | STM32CubeProgrammer | v2.22.0 |
-| VS Code + clangd | — |
-| PlatformIO | — |
+| VS Code + clangd    | —       |
+| PlatformIO          | —       |
 
 ---
 
@@ -121,10 +143,10 @@ cmake --build build/Debug
 
 ### BMI323 register values
 
-| Register | Value | Meaning |
-|---|---|---|
-| WHO_AM_I | `0x43` | Chip ID (low byte only — high byte is garbage) |
-| ACC_CONF | `0x4028` | Continuous mode, 100Hz ODR, ±8g range |
+| Register | Value  | Meaning                                       |
+|----------|--------|-----------------------------------------------|
+| WHO_AM_I | `0x43` | Chip ID (low byte only — high byte is garbage)|
+| ACC_CONF | `0x4028` | Continuous mode, 100Hz ODR, ±8g range      |
 | GYR_CONF | `0x4048` | Continuous mode, 100Hz ODR, ±2000dps range |
 
 ### SPI protocol (confirmed working)
@@ -144,15 +166,12 @@ TX: [addr & 0x7F]  [data_LSB]  [data_MSB]  [0x00 dummy]
 
 ### Known STM32H7 SPI pitfalls
 
-- **3-byte truncation:** The STM32H7 SPI peripheral silently drops the 3rd byte
-  on all 3-byte transactions. All transactions must be padded to 4 bytes.
-- **NSSP mode:** Pulses CS between bytes even with manual CS management — must
-  be disabled. Enable Master Keep IO State in CubeMX.
+- **3-byte truncation:** STM32H7 SPI silently drops the 3rd byte on all
+  3-byte transactions. All transactions must be padded to 4 bytes.
+- **NSSP mode:** Pulses CS between bytes even with manual CS management —
+  must be disabled. Enable Master Keep IO State in CubeMX.
 - **Post-reset state:** After a BMI323 soft reset, the SPI peripheral must be
   fully re-initialized via `HAL_SPI_DeInit()` + `MX_SPI1_Init()`.
-- **Soft reset transaction:** BMI323 resets mid-transaction. Use
-  `HAL_SPI_TransmitReceive` with a short (10ms) timeout for the reset command
-  only — do not use direct register access.
 
 ### BMI323 init sequence
 
@@ -167,42 +186,68 @@ TX: [addr & 0x7F]  [data_LSB]  [data_MSB]  [0x00 dummy]
 9. Write `GYR_CONF = 0x4048`, verify readback
 
 **The BMI323 silently ignores ACC_CONF/GYR_CONF mode bit writes until the
-Feature Engine is initialized.** This is undocumented in the datasheet.
+Feature Engine is initialized. This is undocumented in the datasheet.**
+
+---
+
+## Magnetometer Configuration
+
+### QMC5883L (GY-271) key facts
+
+| Property       | Value                                              |
+|----------------|----------------------------------------------------|
+| I2C address    | `0x2C` (ADDR pulled high — not the default `0x0D`)|
+| Chip ID reg    | `0x0D` returns `0x00` (non-standard, check bypassed)|
+| CTRL1 value    | `0x1D` (OSR=512, ±8G, 200Hz, continuous)          |
+| FBR register   | Must write `0x01` before enabling continuous mode  |
+
+### Hard-iron calibration (not yet done)
+
+Rotate FC slowly through 360° in yaw, record min/max raw X and Y values, then:
+
+```c
+mag_cal.offset_x = (max_x + min_x) / 2.0f;
+mag_cal.offset_y = (max_y + min_y) / 2.0f;
+```
+
+Calibrate after the sensor is in its final mounted position on the frame.
 
 ---
 
 ## Sensor Fusion
 
-A complementary filter runs at 100Hz producing roll and pitch angles in degrees.
-Yaw is omitted — without a magnetometer, gyro-only yaw drifts and is not useful
-for stabilization.
+A complementary filter runs at 100Hz producing roll, pitch, and yaw in degrees.
 
 ### Algorithm
 
 ```
-roll_accel  = atan2(ay_g, az_g)   × (180/π)
-pitch_accel = atan2(-ax_g, az_g)  × (180/π)
+// Roll and pitch — accel reference
+roll_accel  = atan2(ay_g, az_g)  × (180/π)
+pitch_accel = atan2(-ax_g, az_g) × (180/π)
 
-roll_gyro   = roll_prev  + gx_dps × dt
-pitch_gyro  = pitch_prev + gy_dps × dt
+// Gyro integration
+roll_gyro  = roll_prev  + gx_dps × dt
+pitch_gyro = pitch_prev + gy_dps × dt
+yaw_gyro   = yaw_prev   + gz_dps × dt
 
+// Complementary filter — roll and pitch
 roll  = α × roll_gyro  + (1−α) × roll_accel
 pitch = α × pitch_gyro + (1−α) × pitch_accel
+
+// Complementary filter — yaw (shortest-path wrap-safe blend)
+delta     = mag_heading − yaw_gyro        // normalised to (−180, +180]
+yaw_fused = yaw_gyro + (1−β) × delta      // nudge gyro toward mag
 ```
 
 ### Parameters
 
-| Parameter | Value | Notes |
-|---|---|---|
-| α (alpha) | 0.96 | Gyro weight — starting point, tune if needed |
-| dt | 0.01s | Matches 10ms HAL_Delay loop |
-| ACC scale | `8.0 / 32768.0` g/LSB | ±8g range |
-| GYR scale | `2000.0 / 32768.0` dps/LSB | ±2000dps range |
-
-### Verified behavior
-- At rest: stable within ±0.01°
-- During aggressive motion: angles track correctly, no runaway
-- After motion stops: settles cleanly to stable value
+| Parameter | Value  | Notes                                           |
+|-----------|--------|-------------------------------------------------|
+| α (alpha) | 0.96   | Roll/pitch gyro weight                          |
+| β (beta)  | 0.90   | Yaw gyro weight — lower than α, mag is noisier  |
+| dt        | 0.01s  | Matches 10ms HAL_Delay loop                     |
+| ACC scale | `8.0 / 32768.0` g/LSB  | ±8g range                    |
+| GYR scale | `2000.0 / 32768.0` dps/LSB | ±2000dps range           |
 
 ---
 
@@ -212,18 +257,23 @@ pitch = α × pitch_gyro + (1−α) × pitch_accel
 
 Boot messages:
 ```
+[DSHOT] driver ready
+[DSHOT] ESCs armed
 [FLARE] boot ok
 [IMU] WHO_AM_I    = 0x43 (expect 0x43)
 [IMU] ACC default = 0x0028
 [IMU] ACC write   = 0x4028 (expect 0x4028)
 [IMU] GYR write   = 0x4048 (expect 0x4048)
 [FUSION] complementary filter ready
+[MAG] chip ID = 0x00
+[MAG] QMC5883L ready
+[FLARE] PID controller ready
 [IMU] starting 100Hz loop
 ```
 
 100Hz data stream:
 ```
-A:<ax> <ay> <az>  G:<gx> <gy> <gz>  R:<roll>  P:<pitch>
+A:<ax> <ay> <az>  G:<gx> <gy> <gz>  R:<roll>  P:<pitch>  Y:<yaw>
 ```
 
 ---
@@ -259,12 +309,13 @@ Always inspect `main.c` after any CubeMX regeneration before building.
 <type>(<scope>): <description>
 
 Types:  feat, fix, test, docs, refactor, chore
-Scopes: fc/imu, fc/fusion, fc/pid, esp32/quad, esp32/remote, docs
+Scopes: fc/imu, fc/fusion, fc/mag, fc/pid, fc/dshot, esp32/quad, esp32/remote, docs
 ```
 
 Examples:
 ```
-feat(fc/fusion): add complementary filter for roll/pitch estimation
+feat(fc/mag): add QMC5883L magnetometer driver and yaw fusion
 fix(fc/imu): fix BMI323 SPI write — pad to 4 bytes, add feature engine init
 test(fc/imu): verify BMI323 accel axis response on physical tilt
+docs: update hardware-notes and README for Phase 2.5 magnetometer
 ```

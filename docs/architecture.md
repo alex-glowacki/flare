@@ -14,7 +14,8 @@
                         UART
                          │
                   [STM32H723 FC]
-                   ├── BMI323 IMU (SPI)
+                   ├── BMI323 IMU (SPI1)
+                   ├── QMC5883L Mag (I2C1)
                    ├── DSHOT300 → ESC × 4
                    └── Barometer (future)
 ```
@@ -26,24 +27,26 @@
 | Component          | Role                                              |
 |--------------------|---------------------------------------------------|
 | STM32H723ZGT6      | PID, sensor fusion, DSHOT motor output            |
-| BMI323             | 6-axis IMU (gyro + accel) over SPI                |
+| BMI323             | 6-axis IMU (gyro + accel) over SPI1               |
+| QMC5883L (GY-271)  | 3-axis magnetometer, yaw reference, over I2C1     |
 | ESP32 (quad)       | ESP-NOW receive → UART bridge to STM32            |
 | ESP32 (remote)     | Stick ADC read → ESP-NOW transmit, OLED display   |
-| BLHeli_S 30A ESCs  | Motor drive via DSHOT300                          |
+| BLHeli_S 35A ESCs  | Motor drive via DSHOT300                          |
 
 ---
 
 ## Development Phases
 
-| Phase | Goal                                              | Status         |
-|-------|---------------------------------------------------|----------------|
-| 1     | STM32H7 bring-up — blink, UART, toolchain         | ✅ Done         |
-| 2     | IMU bring-up — BMI323, sensor fusion              | 🟡 In progress  |
-| 3     | PID loop — stabilization, DSHOT motor output      | 🔲              |
-| 4     | RC link — ESP-NOW, channel parsing, arming        | 🔲              |
-| 5     | Remote firmware — sticks, OLED, switches          | 🔲              |
-| 6     | Flight testing & tuning                           | 🔲              |
-| 7     | *(Future)* LiDAR mapping — RPLiDAR + Pi companion | 🔲              |
+| Phase | Goal                                              | Status          |
+|-------|---------------------------------------------------|-----------------|
+| 1     | STM32H7 bring-up — blink, UART, toolchain         | ✅ Done          |
+| 2     | IMU bring-up — BMI323, sensor fusion              | ✅ Done          |
+| 2.5   | Magnetometer — QMC5883L, yaw fusion               | ✅ Done          |
+| 3     | PID loop — stabilization, DSHOT motor output      | 🔄 Blocked (ESC) |
+| 4     | RC link — ESP-NOW, channel parsing, arming        | 🔲               |
+| 5     | Remote firmware — sticks, OLED, switches          | 🔲               |
+| 6     | Flight testing & tuning                           | 🔲               |
+| 7     | *(Future)* LiDAR mapping — RPLiDAR + Pi companion | 🔲               |
 
 ---
 
@@ -53,10 +56,19 @@
 firmware/
 ├── fc/                          # STM32H723 flight controller
 │   ├── Core/
-│   │   ├── Inc/                 # CubeMX-generated headers
+│   │   ├── Inc/                 # Headers
+│   │   │   ├── main.h
+│   │   │   ├── imu_fusion.h     # Complementary filter API
+│   │   │   └── mag.h            # QMC5883L driver API
 │   │   └── Src/
-│   │       ├── main.c           # All FC application code (Phase 1-2)
+│   │       ├── main.c           # Boot sequence, 100Hz loop, UART output
+│   │       ├── imu_fusion.c     # Complementary filter (roll, pitch, yaw)
+│   │       ├── mag.c            # QMC5883L I2C driver
+│   │       ├── dshot.c          # DSHOT300 DMA output
+│   │       ├── pid.c            # PID controller
+│   │       ├── flare.c          # Motor mixing, arming logic
 │   │       ├── spi.c            # CubeMX SPI1 init
+│   │       ├── i2c.c            # CubeMX I2C1 init
 │   │       ├── usart.c          # CubeMX USART1 init
 │   │       ├── gpio.c           # CubeMX GPIO init
 │   │       └── ...
@@ -75,32 +87,32 @@ firmware/
 
 ---
 
-## FC Firmware Architecture (Phase 2 current state)
+## FC Firmware Architecture (Phase 2.5 current state)
 
-All flight controller application code lives in `firmware/fc/Core/Src/main.c`.
-Peripheral init (`spi.c`, `usart.c`, `gpio.c`) is CubeMX-generated and must
-not be edited manually — use CubeMX to modify peripheral config, then regenerate.
+All flight controller application code lives in `firmware/fc/Core/Src/`.
+Peripheral init (`spi.c`, `i2c.c`, `usart.c`, `gpio.c`) is CubeMX-generated
+and must not be edited manually.
 
 **Key principle:** All user code must remain inside `/* USER CODE BEGIN */` /
 `/* USER CODE END */` markers to survive CubeMX regeneration. Always inspect
 `main.c` after regeneration — CubeMX can wipe includes placed outside markers.
 
-### main.c Structure
+### main.c Boot Sequence
 
 ```
-Defines      — BMI323 register addresses, config values, timing macros
-Globals      — volatile diagnostic variables (who_am_i_result, acc/gyr readbacks)
-UART_Print   — thin wrapper around HAL_UART_Transmit
-SPI helpers  — SPI1_FlushRxFifo
-BMI323 driver:
-  BMI323_ReadReg        — 4-byte SPI read
-  BMI323_WriteReg       — 4-byte SPI write (3 data + 1 dummy pad)
-  BMI323_BurstRead      — multi-word burst read for accel/gyro data
-  BMI323_InitFeatureEngine — required before ACC_CONF/GYR_CONF writes
-  BMI323_Init           — full init sequence
-  BMI323_ReadAccel      — updates imu_acc_x/y/z globals
-  BMI323_ReadGyro       — updates imu_gyr_x/y/z globals
-main()       — init peripherals → BMI323_Init → 100Hz loop
+MX_*_Init()         — CubeMX peripheral init (GPIO, DMA, UART, SPI, TIM, I2C)
+DSHOT_Init()        — start timer, send 2s zero-throttle arm sequence
+BMI323_Init()       — SPI bring-up, feature engine, acc/gyr config
+IMU_Fusion_Init()   — zero roll/pitch/yaw state
+MAG_Init()          — I2C bring-up, FBR + CTRL1 config
+FLARE_Init()        — PID state, motor mixing init
+[BENCH TEST]        — 500 × throttle 1000 (remove after ESC config verified)
+100Hz while loop:
+  BMI323_ReadAccel / ReadGyro
+  MAG_ReadHeading
+  IMU_Fusion_Update  — complementary filter, all 3 axes
+  FLARE_Update       — PID + motor mixing
+  UART_Print         — live telemetry
 ```
 
 ---
