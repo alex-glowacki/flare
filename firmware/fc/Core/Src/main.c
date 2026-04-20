@@ -55,18 +55,6 @@
 
 /* ── BMI323 configuration values ────────────────────────────────────────── */
 #define BMI323_CMD_SOFT_RESET 0xDEAF
-
-/*
- * ACC_CONF = 0x4028
- *   bits [15:12] = 0x4 → Continuous mode
- *   bits [7:4]   = 0x2 → ODR 100 Hz
- *   bits [3:0]   = 0x8 → ±8g range
- *
- * GYR_CONF = 0x4048
- *   bits [15:12] = 0x4 → Continuous mode
- *   bits [7:4]   = 0x4 → ODR 100 Hz
- *   bits [3:0]   = 0x8 → ±2000 dps range
- */
 #define BMI323_ACC_CONF_VAL 0x4028
 #define BMI323_GYR_CONF_VAL 0x4048
 
@@ -78,10 +66,6 @@
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 
-/*
- * Post-write inter-transaction delay.
- * 200 NOPs ≥ 2 µs at 96 MHz per BMI323 datasheet timing requirement.
- */
 #define BMI323_POST_WRITE_DELAY()                                              \
   do {                                                                         \
     for (int _d = 0; _d < 200; _d++) {                                         \
@@ -130,78 +114,39 @@ static void SPI1_FlushRxFifo(void) {
   __HAL_SPI_ENABLE(&hspi1);
 }
 
-/**
- * @brief  Read a 16-bit register from the BMI323 over SPI.
- *
- *         Protocol (4 bytes):
- *           TX: [addr | 0x80]  [0x00 dummy]  [0x00]  [0x00]
- *           RX: [ignored]      [ignored]     [LSB]   [MSB]
- *
- *         rx[2]=LSB, rx[3]=MSB — confirmed via hardware observation.
- *         For 1-byte registers (e.g. WHO_AM_I), rx[3] will contain
- *         garbage — mask with 0x00FF before comparing.
- */
 static uint16_t BMI323_ReadReg(uint8_t reg) {
   uint8_t tx[4] = {reg | 0x80, 0x00, 0x00, 0x00};
   uint8_t rx[4] = {0x00, 0x00, 0x00, 0x00};
-
   SPI1_FlushRxFifo();
-
   HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_RESET);
   (void)HAL_SPI_TransmitReceive(&hspi1, tx, rx, 4, 10);
   HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_SET);
-
   SPI1_FlushRxFifo();
-
   return (uint16_t)(rx[2] | (rx[3] << 8));
 }
 
-/**
- * @brief  Write a 16-bit value to a BMI323 register over SPI.
- *
- *         Protocol (4 bytes — padded to match read transaction size):
- *           TX: [addr & 0x7F]  [data_LSB]  [data_MSB]  [0x00 dummy]
- *
- *         The BMI323 clocks in the first 3 bytes and ignores the dummy.
- *         4-byte HAL_SPI_TransmitReceive is used because the STM32H7 SPI
- *         peripheral drops the 3rd byte on 3-byte transactions regardless
- *         of approach (HAL_SPI_Transmit, HAL_SPI_TransmitReceive, or direct
- *         register access with TSIZE=3). Confirmed fixed at 4 bytes.
- */
 static void BMI323_WriteReg(uint8_t reg, uint16_t val) {
   uint8_t tx[4] = {
       reg & 0x7F,
-      (uint8_t)(val & 0xFF),        /* LSB */
-      (uint8_t)((val >> 8) & 0xFF), /* MSB */
-      0x00,                         /* dummy pad */
+      (uint8_t)(val & 0xFF),
+      (uint8_t)((val >> 8) & 0xFF),
+      0x00,
   };
   uint8_t rx[4] = {0};
-
   SPI1_FlushRxFifo();
-
   HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_RESET);
   (void)HAL_SPI_TransmitReceive(&hspi1, tx, rx, 4, 10);
   HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_SET);
-
   SPI1_FlushRxFifo();
   BMI323_POST_WRITE_DELAY();
 }
 
-/**
- * @brief  Burst-read N 16-bit words from consecutive BMI323 registers.
- *
- *         Frame: [addr|0x80] [dummy] [D0_LSB D0_MSB D1_LSB D1_MSB ...]
- *         rx[2]=LSB, rx[3]=MSB per word — confirmed byte order.
- */
 static void BMI323_BurstRead(uint8_t reg, int16_t *out, uint8_t count) {
   uint8_t tx_len = 2 + (count * 2);
   uint8_t tx[14] = {0};
   uint8_t rx[14] = {0};
-
   tx[0] = reg | 0x80;
-
   SPI1_FlushRxFifo();
-
   HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_RESET);
   __NOP();
   __NOP();
@@ -211,104 +156,63 @@ static void BMI323_BurstRead(uint8_t reg, int16_t *out, uint8_t count) {
   __NOP();
   __NOP();
   HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_SET);
-
   SPI1_FlushRxFifo();
-
   for (uint8_t i = 0; i < count; i++) {
     uint8_t base = 2 + (i * 2);
     out[i] = (int16_t)(rx[base] | (rx[base + 1] << 8));
   }
 }
 
-/**
- * @brief  Initialize the BMI323 Feature Engine.
- *
- *         Must be called before writing ACC_CONF / GYR_CONF.
- *         The BMI323 silently ignores mode bit writes to config
- *         registers until the feature engine is initialized.
- *
- * @retval 0 on success, 1 on error or timeout
- */
 static uint8_t BMI323_InitFeatureEngine(void) {
   BMI323_WriteReg(BMI323_REG_FEATURE_IO0, 0x0000);
   HAL_Delay(1);
-
   BMI323_WriteReg(BMI323_REG_FEATURE_IO2, 0x012C);
   HAL_Delay(1);
-
   BMI323_WriteReg(BMI323_REG_FEATURE_IO_ST, 0x0001);
   HAL_Delay(1);
-
   BMI323_WriteReg(BMI323_REG_FEATURE_CTRL, 0x0001);
   HAL_Delay(10);
-
-  /* Poll FEATURE_IO1 — wait for bit[3:0] == 0x01 (ready) */
   for (int i = 0; i < 50; i++) {
     HAL_Delay(10);
     uint16_t status = BMI323_ReadReg(BMI323_REG_FEATURE_IO1);
     uint8_t err = status & 0x0F;
     if (err == 0x01)
-      return 0; /* ready */
+      return 0;
     if (err == 0x03)
-      return 1; /* feature engine error */
+      return 1;
   }
-
-  return 1; /* timeout */
+  return 1;
 }
 
-/**
- * @brief  Initialize the BMI323 — soft reset, verify WHO_AM_I,
- *         init feature engine, activate accel + gyro at 100 Hz.
- *
- * @retval 0  success
- *         1  WHO_AM_I mismatch (SPI comms failure)
- *         2  feature engine timeout or error
- */
 static uint8_t BMI323_Init(void) {
   HAL_Delay(10);
-
-  /* Soft reset */
   uint8_t rst_tx[3] = {BMI323_REG_CMD & 0x7F, 0xAF, 0xDE};
   uint8_t rst_rx[3] = {0};
   SPI1_FlushRxFifo();
   HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_RESET);
   (void)HAL_SPI_TransmitReceive(&hspi1, rst_tx, rst_rx, 3, 10);
   HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_SET);
-
   HAL_Delay(50);
-
-  /* Re-initialize SPI peripheral */
   HAL_SPI_DeInit(&hspi1);
   HAL_Delay(1);
   MX_SPI1_Init();
   HAL_Delay(1);
-
-  /* Dummy reads — switches BMI323 from I2C to SPI mode post-reset */
   BMI323_ReadReg(BMI323_REG_CHIP_ID);
   HAL_Delay(50);
   BMI323_ReadReg(BMI323_REG_CHIP_ID);
   HAL_Delay(10);
-
-  /* Verify WHO_AM_I */
   who_am_i_result = BMI323_ReadReg(BMI323_REG_CHIP_ID);
-  if ((who_am_i_result & 0x00FF) != 0x43) {
+  if ((who_am_i_result & 0x00FF) != 0x43)
     return 1;
-  }
-
   acc_conf_default = BMI323_ReadReg(BMI323_REG_ACC_CONF);
-
-  if (BMI323_InitFeatureEngine() != 0) {
+  if (BMI323_InitFeatureEngine() != 0)
     return 2;
-  }
-
   BMI323_WriteReg(BMI323_REG_ACC_CONF, BMI323_ACC_CONF_VAL);
   HAL_Delay(10);
   acc_conf_readback = BMI323_ReadReg(BMI323_REG_ACC_CONF);
-
   BMI323_WriteReg(BMI323_REG_GYR_CONF, BMI323_GYR_CONF_VAL);
   HAL_Delay(10);
   gyr_conf_readback = BMI323_ReadReg(BMI323_REG_GYR_CONF);
-
   return 0;
 }
 
@@ -339,22 +243,17 @@ int main(void) {
   /* USER CODE BEGIN 1 */
   /* USER CODE END 1 */
 
-  /* MPU Configuration -------------------------------------------------------*/
   MPU_Config();
-
-  /* MCU Configuration -------------------------------------------------------*/
   HAL_Init();
 
   /* USER CODE BEGIN Init */
   /* USER CODE END Init */
 
-  /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
   /* USER CODE END SysInit */
 
-  /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_USART1_UART_Init();
@@ -362,6 +261,22 @@ int main(void) {
   MX_TIM4_Init();
 
   /* USER CODE BEGIN 2 */
+
+  /*
+   * DSHOT first — start sending zero throttle frames immediately.
+   * ESCs must receive a valid signal within ~500ms of power-on.
+   * DSHOT_Init() starts the timer PWM only; DSHOT_SendThrottle()
+   * triggers each one-shot DMA frame transfer.
+   */
+  DSHOT_Init();
+  UART_Print("[DSHOT] driver ready\r\n");
+
+  /* Send zero throttle frames for 2 seconds to arm ESCs */
+  for (int i = 0; i < 200; i++) {
+    DSHOT_SendThrottle(0, 0, 0, 0);
+    HAL_Delay(10);
+  }
+  UART_Print("[DSHOT] ESCs armed\r\n");
 
   UART_Print("[FLARE] boot ok\r\n");
 
@@ -395,30 +310,22 @@ int main(void) {
   IMU_Fusion_Init(&imu_fusion);
   UART_Print("[FUSION] complementary filter ready\r\n");
 
-  DSHOT_Init();
-  UART_Print("[DSHOT] driver ready\r\n");
-
-  /* Send zero throttle for 1 second — arms BLHeli_S ESCs */
-  for (int i = 0; i < 100; i++) {
-    DSHOT_SendThrottle(0, 0, 0, 0);
-    HAL_Delay(10);
-  }
-  UART_Print("[DSHOT] ESCs armed\r\n");
-
   FLARE_Init();
   UART_Print("[FLARE] PID controller ready\r\n");
 
-  /* ── BENCH TEST — props off, verify motor spin direction ── */
-  UART_Print("[TEST] spooling all motors to throttle 100...\r\n");
-  FLARE_SetThrottle(100);
-  FLARE_SetArmed(1);
-  HAL_Delay(3000);
-  FLARE_SetArmed(0);
-  FLARE_SetThrottle(0);
-  UART_Print("[TEST] bench test complete - disarmed\r\n");
+  /* ── BENCH TEST — props off, verify motor spin ── */
+  UART_Print("[TEST] spooling all motors to throttle 1000...\r\n");
+
+  for (int i = 0; i < 500; i++) {
+    DSHOT_SendThrottle(1000, 1000, 1000, 1000);
+    HAL_Delay(10);
+  }
+
+  DSHOT_SendThrottle(0, 0, 0, 0);
+  UART_Print("[TEST] bench test complete — sending zero\r\n");
   /* ── END BENCH TEST ──────────────────────────────────────── */
 
-  // UART_Print("[IMU] starting 100Hz loop\r\n");
+  UART_Print("[IMU] starting 100Hz loop\r\n");
 
   /* USER CODE END 2 */
 
@@ -468,7 +375,6 @@ void SystemClock_Config(void) {
 
   HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
-
   while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {
   }
 
@@ -485,9 +391,8 @@ void SystemClock_Config(void) {
   RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_3;
   RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
   RCC_OscInitStruct.PLL.PLLFRACN = 0;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) {
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
     Error_Handler();
-  }
 
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
                                 RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2 |
@@ -499,17 +404,14 @@ void SystemClock_Config(void) {
   RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
   RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV2;
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK) {
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
     Error_Handler();
-  }
 }
 
 /* MPU Configuration */
 void MPU_Config(void) {
   MPU_Region_InitTypeDef MPU_InitStruct = {0};
-
   HAL_MPU_Disable();
-
   MPU_InitStruct.Enable = MPU_REGION_ENABLE;
   MPU_InitStruct.Number = MPU_REGION_NUMBER0;
   MPU_InitStruct.BaseAddress = 0x0;
@@ -521,7 +423,6 @@ void MPU_Config(void) {
   MPU_InitStruct.IsShareable = MPU_ACCESS_SHAREABLE;
   MPU_InitStruct.IsCacheable = MPU_ACCESS_NOT_CACHEABLE;
   MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
-
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
   HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 }

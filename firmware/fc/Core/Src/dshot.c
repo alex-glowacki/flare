@@ -1,6 +1,6 @@
 /* Core/Src/dshot.c
  *
- * DSHOT300 driver — TIM4 PWM + TIM4_UP DMA burst
+ * DSHOT300 driver — TIM4 PWM + TIM4_UP DMA, one-shot per frame
  *
  * Timing (@ 192MHz SYSCLK, APB1 timer clock = 192MHz, ARR = 639):
  *   Bit period  = 640 ticks = 3.333 µs   (DSHOT300 = 300 kbps)
@@ -12,67 +12,49 @@
  *   [15:5]  11-bit throttle value (0 = disarm, 48–2047 = throttle)
  *   [4]     telemetry request bit (0 = no telemetry)
  *   [3:0]   4-bit CRC = (~(v ^ (v >> 4) ^ (v >> 8))) & 0x0F
- *           where v = (throttle << 1) | telemetry
  *
- * DMA buffer layout:
- *   dshot_buf[bit][motor]  — 17 rows (16 data bits + 1 reset), 4 columns
- *   Columns map to CCR1–CCR4 via consecutive register addresses.
- *   DMA writes each row to TIM4->CCR1 on every timer overflow.
+ * Approach: Normal mode DMA, one complete 17-row frame per call.
+ * DSHOT_SendThrottle() builds the frame, starts DMA, and returns.
+ * The caller is responsible for calling at 100Hz (every 10ms).
+ * The 17th row (reset slot = 0) ensures ESC latches the frame.
+ * A clean gap exists between calls at 100Hz (10ms >> 56µs frame).
+ *
+ * STM32H7: buffer placed in D1 AXI SRAM (0x24000000) for DMA access.
+ * D-cache flushed after each buffer write.
  */
 
 #include "dshot.h"
 #include "main.h"
 #include "tim.h"
+#include "usart.h"
+#include <stdio.h>
 #include <string.h>
 
 /* ── Timing constants ───────────────────────────────────────────────────── */
-#define DSHOT_BIT_1 480U /* 75%   of ARR+1=640 */
-#define DSHOT_BIT_0 240U /* 37.5% of ARR+1=640 */
+#define DSHOT_BIT_1 480U
+#define DSHOT_BIT_0 240U
 #define DSHOT_FRAME_BITS 16U
-#define DSHOT_BUF_LEN 17U /* 16 data bits + 1 reset slot */
+#define DSHOT_BUF_LEN 17U
 #define DSHOT_NUM_MOTORS 4U
 
-/*
- * DMA burst buffer.
- *
- * Layout: dshot_buf[bit_index][motor_index]
- *   bit_index  0  = MSB (bit 15)
- *   bit_index  15 = LSB (bit  0)
- *   bit_index  16 = reset slot (all zeros)
- *
- * __attribute__((aligned(4))) ensures the buffer starts on a 32-bit
- * boundary as required by the STM32H7 DMA controller.
- */
-static uint32_t dshot_buf[DSHOT_BUF_LEN][DSHOT_NUM_MOTORS]
-    __attribute__((aligned(4)));
+#define DSHOT_BUF_ADDR 0x24000000UL
+#define DSHOT_BUF_SIZE (DSHOT_BUF_LEN * DSHOT_NUM_MOTORS * sizeof(uint32_t))
+
+static uint32_t (*const dshot_buf)[DSHOT_NUM_MOTORS] =
+    (uint32_t (*)[DSHOT_NUM_MOTORS])DSHOT_BUF_ADDR;
 
 /* ── Internal helpers ───────────────────────────────────────────────────── */
 
-/**
- * @brief  Compute the 4-bit DSHOT CRC.
- *
- *         v = (throttle << 1) | telemetry
- *         CRC = (~(v ^ (v >> 4) ^ (v >> 8))) & 0x0F
- */
 static uint16_t DSHOT_CalcCRC(uint16_t throttle_telem) {
   uint16_t v = throttle_telem;
   return (~(v ^ (v >> 4) ^ (v >> 8))) & 0x0F;
 }
 
-/**
- * @brief  Build a 16-bit DSHOT frame from a throttle value.
- *
- * @param  throttle  0 (disarm) or 48–2047
- * @retval 16-bit frame ready to be serialised into dshot_buf
- */
 static uint16_t DSHOT_BuildFrame(uint16_t throttle) {
-  /* Clamp reserved range 1–47 to 0 (disarm) */
-  if (throttle > 0 && throttle < 48) {
+  if (throttle > 0 && throttle < 48)
     throttle = 0;
-  }
-  if (throttle > 2047) {
+  if (throttle > 2047)
     throttle = 2047;
-  }
 
   uint16_t telemetry = 0;
   uint16_t throttle_telem = (throttle << 1) | telemetry;
@@ -81,53 +63,44 @@ static uint16_t DSHOT_BuildFrame(uint16_t throttle) {
   return (throttle_telem << 4) | crc;
 }
 
-/**
- * @brief  Serialise a 16-bit DSHOT frame into one column of dshot_buf.
- *
- * @param  frame   16-bit DSHOT frame from DSHOT_BuildFrame()
- * @param  motor   Column index (0–3 → M1–M4)
- */
 static void DSHOT_SerialiseFrame(uint16_t frame, uint8_t motor) {
   for (uint8_t bit = 0; bit < DSHOT_FRAME_BITS; bit++) {
-    /* MSB first — bit 15 goes into row 0 */
     uint8_t row = DSHOT_FRAME_BITS - 1 - bit;
     dshot_buf[row][motor] = (frame & (1U << bit)) ? DSHOT_BIT_1 : DSHOT_BIT_0;
   }
-  /* Reset slot — pin held low so ESC latches the frame */
   dshot_buf[DSHOT_FRAME_BITS][motor] = 0U;
 }
 
 /* ── Public API ─────────────────────────────────────────────────────────── */
 
 void DSHOT_Init(void) {
-  memset(dshot_buf, 0, sizeof(dshot_buf));
+  memset((void *)DSHOT_BUF_ADDR, 0, DSHOT_BUF_SIZE);
+  SCB_CleanDCache_by_Addr((uint32_t *)DSHOT_BUF_ADDR, DSHOT_BUF_SIZE);
 
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_2);
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4);
-
-  /*
-   * Start DMA burst on TIM4_UP.
-   *
-   * On each timer overflow DMA writes 4 consecutive words (CCR1–CCR4)
-   * and advances its pointer, repeating for all 17 rows.
-   *
-   * BurstLength = total uint32_t words = 17 rows × 4 motors = 68.
-   */
-  HAL_TIM_DMABurst_WriteStart(&htim4, TIM_DMABASE_CCR1, TIM_DMA_UPDATE,
-                              (uint32_t *)dshot_buf,
-                              DSHOT_BUF_LEN * DSHOT_NUM_MOTORS);
 }
 
 void DSHOT_SendThrottle(uint16_t m1, uint16_t m2, uint16_t m3, uint16_t m4) {
+  /* Build frame into buffer */
   DSHOT_SerialiseFrame(DSHOT_BuildFrame(m1), 0);
   DSHOT_SerialiseFrame(DSHOT_BuildFrame(m2), 1);
   DSHOT_SerialiseFrame(DSHOT_BuildFrame(m3), 2);
   DSHOT_SerialiseFrame(DSHOT_BuildFrame(m4), 3);
 
+  SCB_CleanDCache_by_Addr((uint32_t *)DSHOT_BUF_ADDR, DSHOT_BUF_SIZE);
+
+  /*
+   * Stop any previous burst, then start a new one-shot transfer.
+   * BurstLength=4: DMA writes CCR1-CCR4 on each timer overflow.
+   * Normal mode: DMA stops after 17 rows (68 words) automatically.
+   * The 10ms gap between DSHOT_SendThrottle() calls (100Hz loop)
+   * is far longer than the ~2µs reset gap ESCs require.
+   */
   HAL_TIM_DMABurst_WriteStop(&htim4, TIM_DMA_UPDATE);
+
   HAL_TIM_DMABurst_WriteStart(&htim4, TIM_DMABASE_CCR1, TIM_DMA_UPDATE,
-                              (uint32_t *)dshot_buf,
-                              DSHOT_BUF_LEN * DSHOT_NUM_MOTORS);
+                              (uint32_t *)DSHOT_BUF_ADDR, 4U);
 }
