@@ -47,6 +47,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/dshot.c
     Core/Src/pid.c
     Core/Src/flare.c
+    Core/Src/mag.c
 )
 
 # Add include paths

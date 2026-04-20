@@ -22,51 +22,70 @@
 void IMU_Fusion_Init(IMU_Fusion_t *f) {
   f->roll = 0.0f;
   f->pitch = 0.0f;
+  f->yaw = 0.0f;
 }
 
 void IMU_Fusion_Update(IMU_Fusion_t *f, int16_t ax, int16_t ay, int16_t az,
-                       int16_t gx, int16_t gy, int16_t gz, float dt,
-                       float alpha) {
-  /* ── 1. Convert raw LSB → physical units ──────────────────────────────── */
+                       int16_t gx, int16_t gy, int16_t gz, float mag_heading,
+                       float dt, float alpha, float beta) {
+
+  /* ── 1. Convert raw LSB → physical units ─────────────────────────────── */
   float ax_g = (float)ax * ACC_SCALE;
   float ay_g = (float)ay * ACC_SCALE;
   float az_g = (float)az * ACC_SCALE;
 
   float gx_dps = (float)gx * GYR_SCALE; /* roll rate  */
   float gy_dps = (float)gy * GYR_SCALE; /* pitch rate */
-  (void)gz;                             /* yaw — unused, suppress warning */
+  float gz_dps = (float)gz * GYR_SCALE; /* yaw rate   */
 
   /* ── 2. Accel-derived roll and pitch (degrees) ────────────────────────── */
   /*
    * atan2f gives the angle in radians; multiply by (180/π) to convert.
-   *
-   * roll:  rotation around X axis — use ay and az
-   * pitch: rotation around Y axis — use ax and az
-   *
-   * These are only accurate when the board is near-static (accel = gravity
-   * only). The gyro integration below corrects for dynamic motion.
+   * Only accurate when near-static (accel ≈ gravity). Gyro corrects
+   * for dynamic motion via the complementary filter below.
    */
   float roll_accel = atan2f(ay_g, az_g) * (180.0f / (float)M_PI);
   float pitch_accel = atan2f(-ax_g, az_g) * (180.0f / (float)M_PI);
 
-  /* ── 3. Gyro-integrated roll and pitch (degrees) ─────────────────────── */
-  /*
-   * Integrate gyro rate over the timestep.
-   * Gyro is accurate during motion but drifts over time (no absolute
-   * reference). The complementary filter blends it with accel below.
-   */
+  /* ── 3. Gyro-integrated roll, pitch, and yaw (degrees) ───────────────── */
   float roll_gyro = f->roll + gx_dps * dt;
   float pitch_gyro = f->pitch + gy_dps * dt;
+  float yaw_gyro = f->yaw + gz_dps * dt;
 
-  /* ── 4. Complementary filter blend ───────────────────────────────────── */
-  /*
-   * alpha (e.g. 0.96) weights the gyro-integrated estimate.
-   * (1 - alpha) weights the accel-derived estimate.
-   *
-   * High alpha → trusts gyro → smooth, responsive, drifts slowly.
-   * Low  alpha → trusts accel → noisy, but self-correcting.
-   * 0.96 at 100 Hz is a standard starting point.
-   */
+  /* ── 4. Complementary filter — roll and pitch ────────────────────────── */
   f->roll = alpha * roll_gyro + (1.0f - alpha) * roll_accel;
   f->pitch = alpha * pitch_gyro + (1.0f - alpha) * pitch_accel;
+
+  /* ── 5. Complementary filter — yaw (gyro + magnetometer) ─────────────── */
+  /*
+   * Yaw cannot be corrected by the accelerometer — it has no sensitivity
+   * to rotation around the gravity vector. The magnetometer provides the
+   * absolute heading reference instead.
+   *
+   * The wrap-around problem: if gyro says 359° and mag says 1°, a naive
+   * blend would average to 180° — completely wrong. We instead compute
+   * the shortest angular difference between gyro-integrated yaw and the
+   * mag heading, then apply the correction proportionally.
+   *
+   * shortest_delta is in (-180, +180]. Adding it scaled by (1-beta)
+   * nudges the gyro estimate toward the mag heading by a small amount
+   * each update, without the discontinuity at 0°/360°.
+   */
+  float delta = mag_heading - yaw_gyro;
+
+  /* Normalise delta to (-180, +180] */
+  while (delta > 180.0f)
+    delta -= 360.0f;
+  while (delta < -180.0f)
+    delta += 360.0f;
+
+  float yaw_fused = yaw_gyro + (1.0f - beta) * delta;
+
+  /* Normalise fused yaw to [0, 360) */
+  while (yaw_fused < 0.0f)
+    yaw_fused += 360.0f;
+  while (yaw_fused >= 360.0f)
+    yaw_fused -= 360.0f;
+
+  f->yaw = yaw_fused;
 }
