@@ -13,7 +13,29 @@
     },
   ],
   "settings": {
-    "stm32cube-ide-clangd.path": "cube",
+    "cmake.sourceDirectory": "C:/Users/alexg/OneDrive/Desktop/_Scripts/flare/firmware/fc",
+    "C_Cpp.intelliSenseEngine": "disabled",
+
+    "[c]": {
+      "editor.defaultFormatter": null,
+    },
+    "[cpp]": {
+      "editor.defaultFormatter": null,
+    },
+
+    "editor.formatOnSave": true,
+    "editor.autoClosingComments": "always",
+
+    "C_Cpp.autocomplete": "default",
+    "C_Cpp.autocompleteAddParentheses": true,
+  },
+  "folders.settings": {
+    "firmware/esp32_quad": {
+      "clangd.enabled": false,
+    },
+    "firmware/esp32_remote": {
+      "clangd.enabled": false,
+    },
   },
   "launch": {
     "version": "0.2.0",
