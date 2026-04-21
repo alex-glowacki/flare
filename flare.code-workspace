@@ -6,10 +6,18 @@
     {
       "name": "esp32_quad",
       "path": "firmware/esp32_quad",
+      "settings": {
+        "C_Cpp.intelliSenseEngine": "default",
+        "clangd.enableCodeCompletion": false,
+      },
     },
     {
       "name": "esp32_remote",
       "path": "firmware/esp32_remote",
+      "settings": {
+        "C_Cpp.intelliSenseEngine": "default",
+        "clangd.enableCodeCompletion": false,
+      },
     },
   ],
   "settings": {
@@ -28,14 +36,6 @@
 
     "C_Cpp.autocomplete": "default",
     "C_Cpp.autocompleteAddParentheses": true,
-  },
-  "folders.settings": {
-    "firmware/esp32_quad": {
-      "clangd.enabled": false,
-    },
-    "firmware/esp32_remote": {
-      "clangd.enabled": false,
-    },
   },
   "launch": {
     "version": "0.2.0",
