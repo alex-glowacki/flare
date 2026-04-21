@@ -1,0 +1,82 @@
+# .github/workflows/ci.yml
+
+name: FC Firmware CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "firmware/fc/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "firmware/fc/**"
+      - ".github/workflows/ci.yml"
+
+jobs:
+  build:
+    name: Build STM32H723 Firmware
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Checkout ─────────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Toolchain ────────────────────────────────────────────────────────────
+      - name: Install arm-none-eabi toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi \
+            binutils-arm-none-eabi \
+            ninja-build \
+            cmake
+
+      - name: Print toolchain versions
+        run: |
+          arm-none-eabi-gcc --version
+          cmake --version
+          ninja --version
+
+      # ── Configure ────────────────────────────────────────────────────────────
+      # CFLAGS is appended by CMake *after* toolchain flags, so it is safe to
+      # add extra warning flags here without clobbering -mcpu / -mfloat-abi.
+      #
+      # -Wall    already set in gcc-arm-none-eabi.cmake — included here for
+      #          explicitness; GCC deduplicates it.
+      # -Wextra  enables the second tier of GCC warnings (sign-compare,
+      #          missing-field-initializers, etc.)
+      # -Werror  promotes every warning to an error — this is what fails CI.
+      # -Wno-unused-parameter  suppresses the HAL callback stub flood so only
+      #          application-code warnings trigger -Werror.
+      - name: Configure (CMake)
+        working-directory: firmware/fc
+        env:
+          CFLAGS: "-Wextra -Werror -Wno-unused-parameter"
+        run: cmake --preset Debug
+
+      # ── Build ─────────────────────────────────────────────────────────────────
+      - name: Build
+        working-directory: firmware/fc
+        run: cmake --build --preset Debug 2>&1 | tee build.log
+
+      # ── Verify ELF ───────────────────────────────────────────────────────────
+      - name: Verify ELF and print memory usage
+        run: |
+          ls -lh firmware/fc/build/Debug/fc.elf
+          arm-none-eabi-size firmware/fc/build/Debug/fc.elf
+
+      # ── Upload artifacts ──────────────────────────────────────────────────────
+      # if: always() ensures the log uploads even on a failed build, which is
+      # exactly when you need it most.
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fc-firmware-${{ github.sha }}
+          path: |
+            firmware/fc/build/Debug/fc.elf
+            firmware/fc/build.log
+          retention-days: 7
