@@ -41,21 +41,15 @@ jobs:
           ninja --version
 
       # ── Configure ────────────────────────────────────────────────────────────
-      # CFLAGS is appended by CMake *after* toolchain flags, so it is safe to
-      # add extra warning flags here without clobbering -mcpu / -mfloat-abi.
-      #
-      # -Wall    already set in gcc-arm-none-eabi.cmake — included here for
-      #          explicitness; GCC deduplicates it.
-      # -Wextra  enables the second tier of GCC warnings (sign-compare,
-      #          missing-field-initializers, etc.)
-      # -Werror  promotes every warning to an error — this is what fails CI.
-      # -Wno-unused-parameter  suppresses the HAL callback stub flood so only
-      #          application-code warnings trigger -Werror.
+      # --fresh forces a clean configure on every CI run — no stale cache.
+      # CFLAGS is appended by CMake after toolchain flags, so -mcpu / -mfloat-abi
+      # are preserved. -Wextra -Werror promote warnings to errors.
+      # -Wno-unused-parameter suppresses the HAL callback stub flood.
       - name: Configure (CMake)
         working-directory: firmware/fc
         env:
           CFLAGS: "-Wextra -Werror -Wno-unused-parameter"
-        run: cmake --preset Debug
+        run: cmake --preset Debug --fresh
 
       # ── Build ─────────────────────────────────────────────────────────────────
       - name: Build
@@ -63,14 +57,15 @@ jobs:
         run: cmake --build --preset Debug 2>&1 | tee build.log
 
       # ── Verify ELF ───────────────────────────────────────────────────────────
+      # working-directory must match the build steps so relative paths resolve.
       - name: Verify ELF and print memory usage
+        working-directory: firmware/fc
         run: |
-          ls -lh firmware/fc/build/Debug/fc.elf
-          arm-none-eabi-size firmware/fc/build/Debug/fc.elf
+          ls -lh build/Debug/fc.elf
+          arm-none-eabi-size build/Debug/fc.elf
 
       # ── Upload artifacts ──────────────────────────────────────────────────────
-      # if: always() ensures the log uploads even on a failed build, which is
-      # exactly when you need it most.
+      # if: always() ensures the log uploads even on a failed build.
       - name: Upload build artifacts
         if: always()
         uses: actions/upload-artifact@v4
