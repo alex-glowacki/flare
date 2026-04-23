@@ -48,11 +48,18 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/pid.c
     Core/Src/flare.c
     Core/Src/mag.c
+    Core/Src/rc.c
 )
 
 # Add include paths
+get_filename_component(SHARED_INC
+    "${CMAKE_SOURCE_DIR}/../shared"
+    ABSOLUTE
+)
+
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Inc
+    ${SHARED_INC}          # flare_protocol.h shared with ESP32 firmware
 )
 
 # Add project symbols (macros)
