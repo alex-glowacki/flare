@@ -71,8 +71,7 @@ static void DSHOT_SerialiseFrame(uint16_t frame, uint8_t motor) {
 static void DSHOT_StartDMA(void) {
     DMA_Stream_TypeDef *dma = DMA1_Stream0;
 
-    /* Disable stream before reconfiguring */
-    dma->CR &= ~DMA_SxCR_EN;
+    /* Wait for previous transfer to complete (TC handler disables the stream) */
     while (dma->CR & DMA_SxCR_EN) {}
 
     /* Clear all interrupt flags for Stream0 */
@@ -80,14 +79,14 @@ static void DSHOT_StartDMA(void) {
                   DMA_LIFCR_CTEIF0 | DMA_LIFCR_CDMEIF0 | DMA_LIFCR_CFEIF0;
 
     /* Set source, destination, length */
-    dma->PAR  = (uint32_t)&TIM4->DMAR; /* peripheral: TIM4 burst access register */
-    dma->M0AR = DSHOT_BUF_ADDR;         /* memory: DSHOT buffer */
-    dma->NDTR = DSHOT_BURST_LEN;        /* 68 words total */
+    dma->PAR  = (uint32_t)&TIM4->DMAR;
+    dma->M0AR = DSHOT_BUF_ADDR;
+    dma->NDTR = DSHOT_BURST_LEN;
 
     /* Enable TIM4 DMA update request */
     TIM4->DIER |= TIM_DIER_UDE;
 
-    /* Enable DMA stream — TC interrupt already enabled in DSHOT_Init */
+    /* Enable DMA stream */
     dma->CR |= DMA_SxCR_EN;
 }
 
@@ -113,7 +112,7 @@ void DSHOT_Init(void) {
     dma->FCR = 0; /* Direct mode, no FIFO */
 
     /* Enable DMA1_Stream0 interrupt in NVIC */
-    HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 5, 0);
+    HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
 
     HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
