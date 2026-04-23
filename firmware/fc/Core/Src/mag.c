@@ -31,11 +31,9 @@ uint8_t MAG_Init(I2C_HandleTypeDef *hi2c, uint8_t *chip_id) {
   if (chip_id != NULL)
     *chip_id = id;
 
-  /*
-   * Do not hard-fail on chip ID — this module responds at 0x2C but
-   * may return a non-0xFF chip ID. As long as I2C comms succeed,
-   * proceed with init and let the caller log the ID.
-   */
+  /* Validate chip ID - QMC5883L must return 0xFF */
+  if (id != QMC5883L_CHIP_ID)
+      return MAG_ERR_I2C;
 
   ret = MAG_WriteReg(hi2c, QMC5883L_REG_FBR, 0x01);
   if (ret != MAG_OK)

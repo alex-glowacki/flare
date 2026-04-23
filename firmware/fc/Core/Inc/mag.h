@@ -25,6 +25,9 @@ extern "C" {
 #define QMC5883L_REG_FBR 0x0B
 #define QMC5883L_REG_CHIP_ID 0x0D
 
+/* ── Chip ID ────────────────────────────────────────────────────────────── */
+#define QMC5883L_CHIP_ID     0xFF   /* expected value of register 0x0D */
+
 /* ── CTRL1 bitfield values ──────────────────────────────────────────────── */
 /*
  * MODE[1:0] = 01  → Continuous measurement
