@@ -5,7 +5,7 @@
 // Include this header in both esp32_quad and esp32_remote firmware.
 // Shared location: firmware/shared/flare_protocol.h
 //
-// Packet layout (14 bytes total):
+// Packet layout (14 bytes total): 
 //   [0]      magic      0xAF — sync/identity byte
 //   [1–2]    throttle   uint16_t, 1000–2000 (1000 = min)
 //   [3–4]    roll       uint16_t, 1000–2000 (1500 = center)
