@@ -11,22 +11,24 @@
 
 ### Pin Assignments
 
-| Function     | Pin            | Notes                        |
-|--------------|----------------|------------------------------|
-| SPI1 SCK     | PA5            |                              |
-| SPI1 MISO    | PA6            |                              |
-| SPI1 MOSI    | PA7            |                              |
-| IMU CS       | PB0            | Active-low, manual GPIO      |
-| IMU INT1     | PB1            | Not yet used                 |
-| I2C1 SCL     | PB6            | Magnetometer                 |
-| I2C1 SDA     | PB7            | Magnetometer                 |
-| USART1 TX    | PA9            | CP2102 RX                    |
-| USART1 RX    | PA10           | CP2102 TX                    |
-| User LED     | PG7 (LED_USER) |                              |
-| TIM4 CH1     | PD12           | DSHOT M1 (Front-Left)        |
-| TIM4 CH2     | PD13           | DSHOT M2 (Front-Right)       |
-| TIM4 CH3     | PD14           | DSHOT M3 (Rear-Right)        |
-| TIM4 CH4     | PD15           | DSHOT M4 (Rear-Left)         |
+| Function      | Pin            | Notes                             |
+|---------------|----------------|-----------------------------------|
+| SPI1 SCK      | PA5            | BMI323                            |
+| SPI1 MISO     | PA6            | BMI323                            |
+| SPI1 MOSI     | PA7            | BMI323                            |
+| IMU CS        | PB0            | Active-low, manual GPIO           |
+| IMU INT1      | PB1            | Not yet used                      |
+| I2C1 SCL      | PB6            | Magnetometer                      |
+| I2C1 SDA      | PB7            | Magnetometer                      |
+| USART1 TX     | PA9            | CP2102 RX (debug)                 |
+| USART1 RX     | PA10           | CP2102 TX (debug)                 |
+| USART2 TX     | PA2            | Unused (available for future use) |
+| USART2 RX     | PA3            | ESP32 quad-side UART TX           |
+| User LED      | PG7 (LED_USER) |                                   |
+| TIM4 CH1      | PD12           | DSHOT M1 (Front-Left)             |
+| TIM4 CH2      | PD13           | DSHOT M2 (Front-Right)            |
+| TIM4 CH3      | PD14           | DSHOT M3 (Rear-Right)             |
+| TIM4 CH4      | PD15           | DSHOT M4 (Rear-Left)              |
 
 ### CubeMX SPI1 Configuration (confirmed working)
 
@@ -50,6 +52,21 @@ hspi1.Init.MasterInterDataIdleness = SPI_MASTER_INTERDATA_IDLENESS_00CYCLE;
 - Speed Mode: Fast Mode
 - Clock Speed: 400000 Hz (400 kHz)
 - Pins: PB6 = SCL (AF4), PB7 = SDA (AF4)
+
+### CubeMX USART1 Configuration (debug)
+
+- 115200 baud, 8N1, TX/RX mode
+- PA9 = TX (AF7), PA10 = RX (AF7)
+- No interrupt — polling TX via `HAL_UART_Transmit(..., HAL_MAX_DELAY)`
+
+### CubeMX USART2 Configuration (ESP32 RC link)
+
+- 115200 baud, 8N1, TX/RX mode
+- PA2 = TX (AF7), PA3 = RX (AF7)
+- **NVIC interrupt enabled**, priority **8, 0**
+- `HAL_UART_Receive_IT()` armed 1 byte at a time from `RC_Init()`
+- `USART2_IRQHandler` in `stm32h7xx_it.c` calls `HAL_UART_IRQHandler(&huart2)`
+- `HAL_UART_RxCpltCallback` in `main.c` dispatches to `RC_UART_RxCpltCallback()`
 
 ### CubeMX TIM4 Configuration (DSHOT300)
 
@@ -86,10 +103,25 @@ hspi1.Init.MasterInterDataIdleness = SPI_MASTER_INTERDATA_IDLENESS_00CYCLE;
   `Pulse = 0` (the reset slot value), TIM4 holds the output low between frames.
   Set `CCR1–CCR4 = ARR+1 = 640` in the DMA transfer-complete ISR to restore
   idle-high between frames.
+- **Do not force-abort DMA mid-transfer.** `DSHOT_StartDMA()` must wait for the
+  previous stream to be disabled (EN bit cleared by TC handler) before
+  re-arming. Force-aborting with `CR &= ~DMA_SxCR_EN` corrupts the in-progress
+  frame and causes intermittent ESC disarm.
 - **DMAMUX** handles DMA request routing on STM32H7. `HAL_DMA_Init()` in
   `HAL_TIM_Base_MspInit` configures DMAMUX automatically — do not bypass it.
-  The TC interrupt handler in `stm32h7xx_it.c` must return early before calling
-  `HAL_DMA_IRQHandler` when handling TC directly.
+- **IRQ priority:** DMA1_Stream0 must be at higher priority than USART2.
+  Use 0,0 for DMA1_Stream0 and 8,0 for USART2. Equal priorities cause
+  non-deterministic interleaving and intermittent DSHOT corruption.
+
+### CubeMX Regeneration Gotchas
+
+- **MPU Region 1 gets wiped.** CubeMX regeneration resets `MPU_Config()` to
+  only Region 0 (background deny-all). Region 1 (AXI SRAM at `0x24000000`,
+  512KB, write-through cached) must be manually restored after every regen.
+  This region is required for the DSHOT DMA buffer.
+- **USER CODE blocks:** All user code must be inside `/* USER CODE BEGIN */` /
+  `/* USER CODE END */` markers. Includes, defines, and callbacks placed outside
+  are silently wiped on regen.
 
 ---
 
@@ -204,8 +236,11 @@ if needed.
 ### Chip ID
 
 - **QMC5883L spec:** register `0x0D` returns `0xFF`
-- **This module:** returns `0x00` — ID check bypassed in driver, I2C comms
-  confirmed working via bus scan
+- **This module:** returns `0x00`
+- **Driver behaviour:** `MAG_Init()` validates chip ID against
+  `QMC5883L_CHIP_ID (0xFF)`. Mismatch sets `mag_ok = 0` in `main.c` and
+  all subsequent `MAG_ReadHeading()` calls are skipped. This prevents the
+  20ms DRDY poll timeout from stalling the 100Hz loop when the mag is absent.
 
 ### Wiring (GY-271 → FK723M1)
 
@@ -227,7 +262,7 @@ DRDY pin not connected — polling used instead.
 | CTRL1    | 0x09    | Mode, ODR, RNG, OSR config                |
 | CTRL2    | 0x0A    | Soft reset, pointer roll-over             |
 | FBR      | 0x0B    | SET/RESET period — must write 0x01 first  |
-| CHIP_ID  | 0x0D    | Returns 0x00 on this module (non-standard)|
+| CHIP_ID  | 0x0D    | Returns 0x00 on this module (expect 0xFF) |
 
 ### CTRL1 Configuration
 
@@ -241,7 +276,7 @@ CTRL1 = 0x1D
 
 ### Initialization Sequence
 
-1. Read CHIP_ID at `0x0D` — verify I2C comms (value ignored)
+1. Read CHIP_ID at `0x0D` — validate against `0xFF`; return `MAG_ERR_I2C` on mismatch
 2. Write FBR (`0x0B`) = `0x01` — required by datasheet before continuous mode
 3. Write CTRL1 (`0x09`) = `0x1D` — enable continuous measurement
 
@@ -259,6 +294,21 @@ CTRL1 = 0x1D
 - To calibrate: rotate the FC slowly through 360° in yaw, record min/max
   for X and Y, then set `offset_x = (max_x + min_x) / 2`,
   `offset_y = (max_y + min_y) / 2`
+
+---
+
+## Nano ESP32 (Quad-side)
+
+- **Role:** ESP-NOW receiver → UART bridge to STM32
+- **UART wiring:**
+
+| ESP32 Pin   | Direction | STM32 Pin        |
+|-------------|-----------|------------------|
+| GPIO17 (TX) | →         | PA3 (USART2 RX)  |
+| GND         | shared    | GND              |
+
+- GPIO18 (RX) wired to PA2 (USART2 TX) but unused in Phase 4
+- MAC address logged at boot for pairing with remote ESP32
 
 ---
 
@@ -323,3 +373,8 @@ CTRL1 = 0x1D
   iteration even when not commanding thrust.
 - **STM32 power during ESC work:** Power the STM32 via PDB 5V BEC (not USB-C)
   whenever ESCs are powered — both must share a common ground reference.
+- **Loop timing:** The 100Hz loop runs at approximately 20ms per iteration
+  (10ms `HAL_Delay` + ~10ms for IMU reads, UART print, and DSHOT). This is
+  well within BLHeli_S's 250ms keepalive window. The mag DRDY poll (20 × 1ms)
+  was the original cause of 60ms loop time when the mag was absent — fixed by
+  gating reads behind `mag_ok`.

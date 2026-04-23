@@ -15,7 +15,7 @@ systems learning project.
 | 2     | IMU bring-up — BMI323, sensor fusion              | ✅ Done |
 | 2.5   | Magnetometer — QMC5883L, yaw fusion               | ✅ Done |
 | 3     | PID loop — stabilization, DSHOT motor output      | ✅ Done |
-| 4     | RC link — ESP-NOW, channel parsing, arming        | 🔄 In progress |
+| 4     | RC link — ESP-NOW, channel parsing, arming        | ✅ Done |
 | 5     | Remote firmware — sticks, OLED, switches          | 🔲      |
 | 6     | Flight testing & tuning                           | 🔲      |
 | 7     | *(Future)* LiDAR mapping — RPLiDAR + Pi companion | 🔲      |
@@ -33,7 +33,8 @@ systems learning project.
 - I2C1: PB6=SCL, PB7=SDA
 - CS (IMU): PB0
 - INT1 (IMU): PB1
-- USART1: PA9=TX, PA10=RX
+- USART1: PA9=TX, PA10=RX (debug / CP2102)
+- USART2: PA2=TX, PA3=RX (ESP32 RC link)
 - TIM4 DSHOT: PD12=M1, PD13=M2, PD14=M3, PD15=M4
 - LED: PG7 (LED_USER)
 
@@ -79,6 +80,8 @@ systems learning project.
 
 ### RC Link
 - Nano ESP32 modules (ESP-NOW, quad-side and remote)
+- Quad-side ESP32 GPIO17 (TX) → STM32 PA3 (USART2 RX)
+- Shared GND between ESP32 and STM32
 
 ### Debug / Programming
 - ST-Link V2 clone (V2J37S7) — SWD, CLI only
@@ -92,6 +95,8 @@ systems learning project.
 ```
 flare/
 ├── firmware/
+│   ├── shared/                    # Shared headers (ESP32 + STM32)
+│   │   └── flare_protocol.h       # RC packet definition, CRC-8/MAXIM
 │   ├── fc/                        # STM32H7 flight controller firmware
 │   │   ├── Core/
 │   │   │   ├── Inc/
@@ -100,7 +105,8 @@ flare/
 │   │   │   │   ├── imu_fusion.h   # Complementary filter API
 │   │   │   │   ├── mag.h          # QMC5883L magnetometer driver API
 │   │   │   │   ├── pid.h          # PID controller API
-│   │   │   │   └── flare.h        # Motor mixing, arming logic API
+│   │   │   │   ├── flare.h        # Motor mixing, arming logic API
+│   │   │   │   └── rc.h           # USART2 RC receiver API
 │   │   │   └── Src/
 │   │   │       ├── main.c         # Boot sequence, 100Hz loop, UART output
 │   │   │       ├── imu_fusion.c   # Complementary filter (roll, pitch, yaw)
@@ -108,12 +114,17 @@ flare/
 │   │   │       ├── dshot.c        # DSHOT300 direct DMA output
 │   │   │       ├── pid.c          # PID controller
 │   │   │       ├── flare.c        # Motor mixing, arming logic
+│   │   │       ├── rc.c           # USART2 interrupt-driven RC receiver
 │   │   │       └── stm32h7xx_it.c # IRQ handlers (incl. DSHOT TC callback)
 │   │   ├── cmake/stm32cubemx/     # CubeMX-generated CMake support
 │   │   ├── CMakeLists.txt
 │   │   └── build/Debug/           # Build output (gitignored)
 │   ├── esp32_quad/                # ESP-NOW quad-side firmware (PlatformIO)
+│   │   ├── src/main.cpp           # ESP-NOW RX → UART bridge to STM32
+│   │   └── platformio.ini
 │   └── esp32_remote/              # ESP-NOW remote firmware (PlatformIO)
+│       ├── src/main.cpp           # Stub — Phase 5
+│       └── platformio.ini
 ├── config/
 │   └── esc_blheli_setup.ini       # BLHeli_S ESC configuration backup
 └── docs/
@@ -141,7 +152,7 @@ Working directory: `firmware/fc`
 
 **Build:**
 ```powershell
-cmake --build build/Debug
+cmake --build --preset Debug
 ```
 
 **Flash:**
@@ -212,9 +223,16 @@ Feature Engine is initialized. This is undocumented in the datasheet.**
 | Property       | Value                                              |
 |----------------|----------------------------------------------------|
 | I2C address    | `0x2C` (ADDR pulled high — not the default `0x0D`)|
-| Chip ID reg    | `0x0D` returns `0x00` (non-standard, check bypassed)|
+| Chip ID reg    | `0x0D` returns `0x00` (non-standard)               |
 | CTRL1 value    | `0x1D` (OSR=512, ±8G, 200Hz, continuous)          |
 | FBR register   | Must write `0x01` before enabling continuous mode  |
+
+### Graceful absent handling
+
+`MAG_Init()` validates the chip ID against `QMC5883L_CHIP_ID (0xFF)`. If the
+sensor is absent or returns a wrong ID, `mag_ok = 0` is set and all
+`MAG_ReadHeading()` calls are skipped in the main loop. This prevents the
+20ms DRDY poll timeout from stalling the 100Hz loop when the mag is not wired.
 
 ### Hard-iron calibration (not yet done)
 
@@ -226,6 +244,44 @@ mag_cal.offset_y = (max_y + min_y) / 2.0f;
 ```
 
 Calibrate after the sensor is in its final mounted position on the frame.
+
+---
+
+## RC Link — FLARE Protocol
+
+### Packet format (`firmware/shared/flare_protocol.h`)
+
+| Byte(s) | Field      | Type      | Notes                            |
+|---------|------------|-----------|----------------------------------|
+| 0       | magic      | uint8_t   | `0xAF` — sync byte               |
+| 1–2     | throttle   | uint16_t  | 1000–2000 (1000 = min)           |
+| 3–4     | roll       | uint16_t  | 1000–2000 (1500 = center)        |
+| 5–6     | pitch      | uint16_t  | 1000–2000 (1500 = center)        |
+| 7–8     | yaw        | uint16_t  | 1000–2000 (1500 = center)        |
+| 9       | armed      | uint8_t   | 0 = disarmed, 1 = armed          |
+| 10      | mode       | uint8_t   | 0 = angle, 1 = acro              |
+| 11–12   | reserved   | uint8_t[2]| Zero-padded, future use          |
+| 13      | checksum   | uint8_t   | CRC-8/MAXIM over bytes [0–12]    |
+
+Total: **14 bytes**. Shared header used by both ESP32 and STM32 firmware.
+
+### STM32 RC receiver (rc.c / rc.h)
+
+- USART2, 115200 8N1, PA3 = RX
+- Interrupt-driven, 1 byte at a time via `HAL_UART_Receive_IT()`
+- Sync recovery: discards bytes until `0xAF` magic is seen
+- CRC-8/MAXIM validated on complete 14-byte frame
+- `RC_GetPacket()` — returns new packet to main loop (clears flag)
+- `RC_IsHealthy()` — returns 1 if packet received within `RC_TIMEOUT_MS` (250ms)
+- USART2 IRQ priority: 8,0 (below DMA1_Stream0 at 0,0)
+
+### ESP32 quad-side firmware (esp32_quad/src/main.cpp)
+
+- ESP-NOW receiver, Station mode
+- `on_packet_received()` callback: validates magic + length + CRC, forwards
+  raw 14-byte packet over UART to STM32
+- UART: GPIO17 (TX) → STM32 PA3, 115200 baud
+- Diagnostics printed every 5 seconds: `rx_ok` / `rx_bad` counters
 
 ---
 
@@ -245,12 +301,15 @@ Calibrate after the sensor is in its final mounted position on the frame.
 - **No HAL DMA burst API** — `HAL_TIM_DMABurst_WriteStart` ignores NDTR on
   STM32H7 and runs continuously. Direct DMA register programming used instead.
 - **TIM4->DCR:** DBA=13 (CCR1 offset), DBL=3 (4 transfers per burst)
-- **TIM4->DMAR:** peripheral address for burst access register
 - **Buffer:** `dshot_buf[17][4]` uint32_t at `0x24000000` (D1 AXI SRAM)
 - **Idle-high:** PD12–PD15 driven HIGH in `gpio.c` before TIM4 AF init;
   CCR1–CCR4 set to 640 in DMA TC interrupt after each frame
+- **Re-arm safety:** `DSHOT_StartDMA()` waits for stream disable (TC handler
+  clears EN bit) before re-arming — prevents mid-frame abort corruption
 - **ESC keepalive:** `DSHOT_SendThrottle(0,0,0,0)` called every loop iteration
   — BLHeli_S disarms after ~250ms without a valid frame
+- **DMA1_Stream0 IRQ priority:** 0,0 (highest) — must not be preempted by
+  USART2 during the TC handler idle-high restore
 
 ---
 
@@ -306,14 +365,20 @@ Boot messages:
 [IMU] GYR write   = 0x4048 (expect 0x4048)
 [FUSION] complementary filter ready
 [MAG] chip ID = 0x00
-[MAG] QMC5883L ready
+[MAG] INIT FAILED -- skipping mag reads   ← when sensor absent
 [FLARE] PID controller ready
+[RC] USART2 receiver ready
 [IMU] starting 100Hz loop
 ```
 
 100Hz data stream:
 ```
-A:<ax> <ay> <az>  G:<gx> <gy> <gz>  R:<roll>  P:<pitch>  Y:<yaw>
+A:<ax> <ay> <az>  G:<gx> <gy> <gz>  R:<roll>  P:<pitch>  Y:<yaw>  RC:<OK|LOST>
+```
+
+RC packet log (when packet received):
+```
+[RC] arm=<0|1> thr=<1000-2000> rol=<1000-2000> pit=<1000-2000> yaw=<1000-2000> mode=<0|1>
 ```
 
 ---
@@ -323,8 +388,7 @@ A:<ax> <ay> <az>  G:<gx> <gy> <gz>  R:<roll>  P:<pitch>  Y:<yaw>
 Firmware: V2J37S7. Known limitations:
 - GUI connection in STM32CubeProgrammer fails — use CLI only
 - ITM SWO non-functional
-- VS Code F5 flashing non-functional (requires `ST-LINK_gdbserver.exe`
-  from CubeIDE, not installed)
+- VS Code F5 flashing non-functional
 - Always pass `freq=100 reset=HWrst` flags to CLI
 
 **Memory read workaround** (when UART unavailable): promote variables to
@@ -339,6 +403,8 @@ Regenerating code in CubeMX can:
 - Wipe `#include` statements placed outside `USER CODE` blocks
 - Introduce brace mismatches
 - Move `/* USER CODE END WHILE */` outside the loop body
+- Wipe MPU region config from `MPU_Config()` — always restore Region 1
+  (AXI SRAM at `0x24000000`) after regen
 
 Always inspect `main.c` after any CubeMX regeneration before building.
 
@@ -350,14 +416,15 @@ Always inspect `main.c` after any CubeMX regeneration before building.
 <type>(<scope>): <description>
 
 Types:  feat, fix, test, docs, refactor, chore
-Scopes: fc/imu, fc/fusion, fc/mag, fc/pid, fc/dshot, fc/main, esp32/quad, esp32/remote, docs
+Scopes: fc/imu, fc/fusion, fc/mag, fc/pid, fc/dshot, fc/main, fc/rc,
+        esp32/quad, esp32/remote, shared, docs
 ```
 
 Examples:
 ```
-feat(fc/dshot): add DSHOT300 direct DMA driver with TIM4 burst
-fix(fc/dshot): set CCR1-4 idle-high on DMA transfer complete via TC interrupt
-fix(fc/main): send zero throttle each loop iteration to keep ESCs armed
-chore(fc/main): remove bench test, motors confirmed spinning on all 4 channels
-docs: update all docs for Phase 3 completion
+feat(shared): add flare_protocol.h — RC packet definition, CRC-8/MAXIM checksum
+feat(fc/rc): add USART2 interrupt-driven RC receiver (rc.c, rc.h)
+fix(fc/dshot): wait for DMA stream disable instead of force-aborting transfer
+fix(fc/mag): add QMC5883L_CHIP_ID validation, skip reads when sensor absent
+docs: update all docs for Phase 4 completion
 ```
