@@ -23,6 +23,8 @@
 #include "gpio.h"
 #include "i2c.h"
 #include "spi.h"
+#include "stm32h7xx_hal_cortex.h"
+#include "stm32h7xx_hal_gpio.h"
 #include "tim.h"
 #include "usart.h"
 
@@ -334,18 +336,6 @@ int main(void) {
   FLARE_Init();
   UART_Print("[FLARE] PID controller ready\r\n");
 
-  /* ── BENCH TEST — props off, verify motor spin ── */
-  UART_Print("[TEST] spooling all motors to throttle 1000...\r\n");
-
-  for (int i = 0; i < 500; i++) {
-    DSHOT_SendThrottle(1000, 1000, 1000, 1000);
-    HAL_Delay(10);
-  }
-
-  DSHOT_SendThrottle(0, 0, 0, 0);
-  UART_Print("[TEST] bench test complete — sending zero\r\n");
-  /* ── END BENCH TEST ──────────────────────────────────────── */
-
   UART_Print("[IMU] starting 100Hz loop\r\n");
 
   /* USER CODE END 2 */
@@ -385,6 +375,8 @@ int main(void) {
              imu_acc_x, imu_acc_y, imu_acc_z, imu_gyr_x, imu_gyr_y, imu_gyr_z,
              imu_fusion.roll, imu_fusion.pitch, imu_fusion.yaw);
     UART_Print(msg);
+
+    DSHOT_SendThrottle(0, 0, 0, 0);   /* keep ESCs armed, zero throttle */
 
     HAL_Delay(IMU_LOOP_INTERVAL_MS);
 
@@ -443,6 +435,8 @@ void SystemClock_Config(void) {
 void MPU_Config(void) {
   MPU_Region_InitTypeDef MPU_InitStruct = {0};
   HAL_MPU_Disable();
+
+  /* Region 0: block entire 4GB, no access (background region) */
   MPU_InitStruct.Enable = MPU_REGION_ENABLE;
   MPU_InitStruct.Number = MPU_REGION_NUMBER0;
   MPU_InitStruct.BaseAddress = 0x0;
@@ -455,6 +449,21 @@ void MPU_Config(void) {
   MPU_InitStruct.IsCacheable = MPU_ACCESS_NOT_CACHEABLE;
   MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
+
+  /* Region 1: AXI SRAM (0x24000000, 320K) - DMA accessible, write-through */
+  MPU_InitStruct.Enable = MPU_REGION_ENABLE;
+  MPU_InitStruct.Number = MPU_REGION_NUMBER1;
+  MPU_InitStruct.BaseAddress = 0x24000000;
+  MPU_InitStruct.Size = MPU_REGION_SIZE_512KB; /* covers 320K */
+  MPU_InitStruct.SubRegionDisable = 0x00;
+  MPU_InitStruct.TypeExtField = MPU_TEX_LEVEL1;
+  MPU_InitStruct.AccessPermission = MPU_REGION_FULL_ACCESS;
+  MPU_InitStruct.DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE;
+  MPU_InitStruct.IsShareable = MPU_ACCESS_NOT_SHAREABLE;
+  MPU_InitStruct.IsCacheable = MPU_ACCESS_CACHEABLE;
+  MPU_InitStruct.IsBufferable = MPU_ACCESS_BUFFERABLE;
+  HAL_MPU_ConfigRegion(&MPU_InitStruct);
+
   HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 }
 
