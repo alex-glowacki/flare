@@ -14,8 +14,8 @@ systems learning project.
 | 1     | STM32H7 bring-up — blink, UART, toolchain         | ✅ Done |
 | 2     | IMU bring-up — BMI323, sensor fusion              | ✅ Done |
 | 2.5   | Magnetometer — QMC5883L, yaw fusion               | ✅ Done |
-| 3     | PID loop — stabilization, DSHOT motor output      | 🔄 Blocked (ESC config) |
-| 4     | RC link — ESP-NOW, channel parsing, arming        | 🔲      |
+| 3     | PID loop — stabilization, DSHOT motor output      | ✅ Done |
+| 4     | RC link — ESP-NOW, channel parsing, arming        | 🔄 In progress |
 | 5     | Remote firmware — sticks, OLED, switches          | 🔲      |
 | 6     | Flight testing & tuning                           | 🔲      |
 | 7     | *(Future)* LiDAR mapping — RPLiDAR + Pi companion | 🔲      |
@@ -28,7 +28,7 @@ systems learning project.
 - Custom PETG-CF printed, F450-class (450mm), self-modeled
 
 ### Flight Controller — FK723M1-ZGT6
-- MCU: STM32H723ZGT6 (Cortex-M7, 96 MHz)
+- MCU: STM32H723ZGT6 (Cortex-M7, 192MHz)
 - SPI1: PA5=SCK, PA6=MISO, PA7=MOSI
 - I2C1: PB6=SCL, PB7=SDA
 - CS (IMU): PB0
@@ -61,9 +61,18 @@ systems learning project.
 - I2C address: `0x2C` (ADDR pin pulled high on module — not the typical `0x0D`)
 - Calibration not yet performed — hard-iron offsets are zero
 
-### ESCs
-- Readytosky 35A BLHeli_S (4×)
-- Startup power not yet configured — awaiting ATmega328P Nano
+### ESCs — Readytosky 35A BLHeli_S (×4)
+
+| Motor | Position    | Spin | Pin  |
+|-------|-------------|------|------|
+| M1    | Front-Left  | CCW  | PD12 |
+| M2    | Front-Right | CW   | PD13 |
+| M3    | Rear-Right  | CCW  | PD14 |
+| M4    | Rear-Left   | CW   | PD15 |
+
+- Protocol: DSHOT300
+- Demag Compensation: High (configured via BLHeliSuite + ATmega328P Nano)
+- Config backed up: `config/esc_blheli_setup.ini`
 
 ### Power Distribution
 - QWinOut PDB with built-in 5V and 12V BECs
@@ -87,20 +96,26 @@ flare/
 │   │   ├── Core/
 │   │   │   ├── Inc/
 │   │   │   │   ├── main.h
+│   │   │   │   ├── dshot.h        # DSHOT300 driver API
 │   │   │   │   ├── imu_fusion.h   # Complementary filter API
-│   │   │   │   └── mag.h          # QMC5883L magnetometer driver API
+│   │   │   │   ├── mag.h          # QMC5883L magnetometer driver API
+│   │   │   │   ├── pid.h          # PID controller API
+│   │   │   │   └── flare.h        # Motor mixing, arming logic API
 │   │   │   └── Src/
 │   │   │       ├── main.c         # Boot sequence, 100Hz loop, UART output
 │   │   │       ├── imu_fusion.c   # Complementary filter (roll, pitch, yaw)
 │   │   │       ├── mag.c          # QMC5883L I2C driver
-│   │   │       ├── dshot.c        # DSHOT300 DMA output
+│   │   │       ├── dshot.c        # DSHOT300 direct DMA output
 │   │   │       ├── pid.c          # PID controller
-│   │   │       └── flare.c        # Motor mixing, arming logic
+│   │   │       ├── flare.c        # Motor mixing, arming logic
+│   │   │       └── stm32h7xx_it.c # IRQ handlers (incl. DSHOT TC callback)
 │   │   ├── cmake/stm32cubemx/     # CubeMX-generated CMake support
 │   │   ├── CMakeLists.txt
 │   │   └── build/Debug/           # Build output (gitignored)
 │   ├── esp32_quad/                # ESP-NOW quad-side firmware (PlatformIO)
 │   └── esp32_remote/              # ESP-NOW remote firmware (PlatformIO)
+├── config/
+│   └── esc_blheli_setup.ini       # BLHeli_S ESC configuration backup
 └── docs/
     └── session_summaries/         # Per-session progress logs
 ```
@@ -143,11 +158,11 @@ cmake --build build/Debug
 
 ### BMI323 register values
 
-| Register | Value  | Meaning                                       |
-|----------|--------|-----------------------------------------------|
-| WHO_AM_I | `0x43` | Chip ID (low byte only — high byte is garbage)|
-| ACC_CONF | `0x4028` | Continuous mode, 100Hz ODR, ±8g range      |
-| GYR_CONF | `0x4048` | Continuous mode, 100Hz ODR, ±2000dps range |
+| Register | Value    | Meaning                                        |
+|----------|----------|------------------------------------------------|
+| WHO_AM_I | `0x43`   | Chip ID (low byte only — high byte is garbage) |
+| ACC_CONF | `0x4028` | Continuous mode, 100Hz ODR, ±8g range          |
+| GYR_CONF | `0x4048` | Continuous mode, 100Hz ODR, ±2000dps range     |
 
 ### SPI protocol (confirmed working)
 
@@ -211,6 +226,31 @@ mag_cal.offset_y = (max_y + min_y) / 2.0f;
 ```
 
 Calibrate after the sensor is in its final mounted position on the frame.
+
+---
+
+## DSHOT300 Configuration
+
+### Timing (@ 192MHz SYSCLK, TIM4 ARR = 639)
+
+| Symbol     | Value  | Meaning                  |
+|------------|--------|--------------------------|
+| Bit period | 3.33µs | 300 kbps                 |
+| BIT_1      | 480    | 75% duty cycle — logic 1 |
+| BIT_0      | 240    | 37.5% duty cycle — logic 0|
+| Idle       | 640    | 100% duty — idle-high    |
+
+### Key implementation facts
+
+- **No HAL DMA burst API** — `HAL_TIM_DMABurst_WriteStart` ignores NDTR on
+  STM32H7 and runs continuously. Direct DMA register programming used instead.
+- **TIM4->DCR:** DBA=13 (CCR1 offset), DBL=3 (4 transfers per burst)
+- **TIM4->DMAR:** peripheral address for burst access register
+- **Buffer:** `dshot_buf[17][4]` uint32_t at `0x24000000` (D1 AXI SRAM)
+- **Idle-high:** PD12–PD15 driven HIGH in `gpio.c` before TIM4 AF init;
+  CCR1–CCR4 set to 640 in DMA TC interrupt after each frame
+- **ESC keepalive:** `DSHOT_SendThrottle(0,0,0,0)` called every loop iteration
+  — BLHeli_S disarms after ~250ms without a valid frame
 
 ---
 
@@ -298,6 +338,7 @@ Firmware: V2J37S7. Known limitations:
 Regenerating code in CubeMX can:
 - Wipe `#include` statements placed outside `USER CODE` blocks
 - Introduce brace mismatches
+- Move `/* USER CODE END WHILE */` outside the loop body
 
 Always inspect `main.c` after any CubeMX regeneration before building.
 
@@ -309,13 +350,14 @@ Always inspect `main.c` after any CubeMX regeneration before building.
 <type>(<scope>): <description>
 
 Types:  feat, fix, test, docs, refactor, chore
-Scopes: fc/imu, fc/fusion, fc/mag, fc/pid, fc/dshot, esp32/quad, esp32/remote, docs
+Scopes: fc/imu, fc/fusion, fc/mag, fc/pid, fc/dshot, fc/main, esp32/quad, esp32/remote, docs
 ```
 
 Examples:
 ```
-feat(fc/mag): add QMC5883L magnetometer driver and yaw fusion
-fix(fc/imu): fix BMI323 SPI write — pad to 4 bytes, add feature engine init
-test(fc/imu): verify BMI323 accel axis response on physical tilt
-docs: update hardware-notes and README for Phase 2.5 magnetometer
+feat(fc/dshot): add DSHOT300 direct DMA driver with TIM4 burst
+fix(fc/dshot): set CCR1-4 idle-high on DMA transfer complete via TC interrupt
+fix(fc/main): send zero throttle each loop iteration to keep ESCs armed
+chore(fc/main): remove bench test, motors confirmed spinning on all 4 channels
+docs: update all docs for Phase 3 completion
 ```

@@ -42,8 +42,8 @@
 | 1     | STM32H7 bring-up — blink, UART, toolchain         | ✅ Done          |
 | 2     | IMU bring-up — BMI323, sensor fusion              | ✅ Done          |
 | 2.5   | Magnetometer — QMC5883L, yaw fusion               | ✅ Done          |
-| 3     | PID loop — stabilization, DSHOT motor output      | 🔄 Blocked (ESC) |
-| 4     | RC link — ESP-NOW, channel parsing, arming        | 🔲               |
+| 3     | PID loop — stabilization, DSHOT motor output      | ✅ Done          |
+| 4     | RC link — ESP-NOW, channel parsing, arming        | 🔄 In progress   |
 | 5     | Remote firmware — sticks, OLED, switches          | 🔲               |
 | 6     | Flight testing & tuning                           | 🔲               |
 | 7     | *(Future)* LiDAR mapping — RPLiDAR + Pi companion | 🔲               |
@@ -58,19 +58,23 @@ firmware/
 │   ├── Core/
 │   │   ├── Inc/                 # Headers
 │   │   │   ├── main.h
+│   │   │   ├── dshot.h          # DSHOT300 driver API
 │   │   │   ├── imu_fusion.h     # Complementary filter API
-│   │   │   └── mag.h            # QMC5883L driver API
+│   │   │   ├── mag.h            # QMC5883L driver API
+│   │   │   ├── pid.h            # PID controller API
+│   │   │   └── flare.h          # Motor mixing, arming logic API
 │   │   └── Src/
 │   │       ├── main.c           # Boot sequence, 100Hz loop, UART output
 │   │       ├── imu_fusion.c     # Complementary filter (roll, pitch, yaw)
 │   │       ├── mag.c            # QMC5883L I2C driver
-│   │       ├── dshot.c          # DSHOT300 DMA output
+│   │       ├── dshot.c          # DSHOT300 direct DMA output (no HAL burst)
 │   │       ├── pid.c            # PID controller
 │   │       ├── flare.c          # Motor mixing, arming logic
+│   │       ├── stm32h7xx_it.c   # IRQ handlers — includes DSHOT TC callback
 │   │       ├── spi.c            # CubeMX SPI1 init
 │   │       ├── i2c.c            # CubeMX I2C1 init
 │   │       ├── usart.c          # CubeMX USART1 init
-│   │       ├── gpio.c           # CubeMX GPIO init
+│   │       ├── gpio.c           # CubeMX GPIO init (includes DSHOT idle-high)
 │   │       └── ...
 │   ├── cmake/stm32cubemx/       # CubeMX CMake integration
 │   ├── CMakeLists.txt
@@ -87,11 +91,11 @@ firmware/
 
 ---
 
-## FC Firmware Architecture (Phase 2.5 current state)
+## FC Firmware Architecture (Phase 3 complete)
 
 All flight controller application code lives in `firmware/fc/Core/Src/`.
 Peripheral init (`spi.c`, `i2c.c`, `usart.c`, `gpio.c`) is CubeMX-generated
-and must not be edited manually.
+and must not be edited manually except inside `USER CODE` blocks.
 
 **Key principle:** All user code must remain inside `/* USER CODE BEGIN */` /
 `/* USER CODE END */` markers to survive CubeMX regeneration. Always inspect
@@ -101,19 +105,64 @@ and must not be edited manually.
 
 ```
 MX_*_Init()         — CubeMX peripheral init (GPIO, DMA, UART, SPI, TIM, I2C)
-DSHOT_Init()        — start timer, send 2s zero-throttle arm sequence
+DSHOT_Init()        — configure DMA1_Stream0, set CCRs idle-high, start PWM
+                      send 200 × zero-throttle frames (2s arm sequence)
 BMI323_Init()       — SPI bring-up, feature engine, acc/gyr config
 IMU_Fusion_Init()   — zero roll/pitch/yaw state
 MAG_Init()          — I2C bring-up, FBR + CTRL1 config
 FLARE_Init()        — PID state, motor mixing init
-[BENCH TEST]        — 500 × throttle 1000 (remove after ESC config verified)
 100Hz while loop:
   BMI323_ReadAccel / ReadGyro
   MAG_ReadHeading
   IMU_Fusion_Update  — complementary filter, all 3 axes
   FLARE_Update       — PID + motor mixing
   UART_Print         — live telemetry
+  DSHOT_SendThrottle(0,0,0,0)  — keep ESCs armed (zero throttle until RC live)
 ```
+
+---
+
+## DSHOT300 Implementation
+
+### Approach
+Direct DMA register programming — HAL DMA burst API (`HAL_TIM_DMABurst_WriteStart`)
+was found to ignore NDTR on STM32H7 and run continuously regardless of Normal
+mode setting. Direct register access bypasses this completely.
+
+### Buffer Layout
+`dshot_buf[17][4]` — 17 rows × 4 motors = 68 words, placed in D1 AXI SRAM
+at `0x24000000`. 16 data rows (one bit per row) + 1 reset slot row (all zeros).
+
+### Transfer Sequence (per frame)
+1. `DSHOT_SendThrottle()` serialises 4 throttle values into `dshot_buf`
+2. D-cache flushed via `SCB_CleanDCache_by_Addr`
+3. `DSHOT_StartDMA()` reconfigures DMA1_Stream0 registers directly and enables
+   `TIM4->DIER |= TIM_DIER_UDE`
+4. On each TIM4 update event, DMA writes 4 words to `TIM4->DMAR`, which the
+   timer routes to CCR1→CCR2→CCR3→CCR4 via the burst access register
+5. After 68 words (17 update events), DMA stops (Normal mode)
+6. `DMA1_Stream0_IRQHandler` TC callback fires:
+   - Clears `TIM_DIER_UDE` to stop further DMA requests
+   - Sets `CCR1–CCR4 = 640` (ARR+1 = 100% duty) to hold outputs idle-high
+
+### Key Constants (@ 192MHz SYSCLK, ARR = 639)
+| Symbol        | Value | Meaning                     |
+|---------------|-------|-----------------------------|
+| `DSHOT_BIT_1` | 480   | 75% duty — logic 1          |
+| `DSHOT_BIT_0` | 240   | 37.5% duty — logic 0        |
+| `DSHOT_CCR_IDLE` | 640 | 100% duty — idle-high      |
+| Bit period    | 3.33µs | 300 kbps (DSHOT300)        |
+
+### TIM4 DCR Configuration
+```c
+TIM4->DCR = (3U << TIM_DCR_DBL_Pos)   /* DBL=3 → 4 transfers per burst */
+          | (13U << TIM_DCR_DBA_Pos);  /* DBA=13 → CCR1 word offset     */
+```
+
+### Idle-High Boot Sequence
+`gpio.c` drives PD12–PD15 HIGH as `GPIO_OUTPUT_PP` immediately after GPIOD
+clock enable — before `MX_TIM4_Init()` switches them to TIM4 AF. This prevents
+ESC protocol auto-detection from seeing a floating/low signal at startup.
 
 ---
 
@@ -132,7 +181,7 @@ FLARE_Init()        — PID state, motor mixing init
 ### Build & Flash
 
 ```powershell
-# Build
+# Build (from firmware/fc/)
 cmake --build build/Debug
 
 # Flash

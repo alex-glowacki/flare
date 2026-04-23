@@ -4,7 +4,7 @@
 
 ## STM32H723ZGT6 (FK723M1 board)
 
-- Cortex-M7 @ 96 MHz SYSCLK (HSI PLL: PLLM=4, PLLN=12, PLLP=1)
+- Cortex-M7 @ 192MHz SYSCLK (HSI PLL: PLLM=4, PLLN=12, PLLP=1)
 - 1MB Flash, 564KB RAM, 144-pin LQFP
 - **Clone ST-Link V2 (V2J37S7):** GUI connection in CubeProgrammer fails — use
   CLI only with `freq=100 reset=HWrst` flags. ITM SWO non-functional.
@@ -51,6 +51,17 @@ hspi1.Init.MasterInterDataIdleness = SPI_MASTER_INTERDATA_IDLENESS_00CYCLE;
 - Clock Speed: 400000 Hz (400 kHz)
 - Pins: PB6 = SCL (AF4), PB7 = SDA (AF4)
 
+### CubeMX TIM4 Configuration (DSHOT300)
+
+- Prescaler: 0 (no division)
+- Counter Period (ARR): 639
+- Clock Division: DIV1
+- Auto-Reload Preload: Enabled
+- PWM Mode 1 on CH1–CH4 (PD12–PD15, AF2)
+- DMA: DMA1_Stream0, TIM4_UP request, Memory→Peripheral, word width, Normal mode
+- **OCIdleState is NOT set in CubeMX** — idle-high is enforced in firmware via
+  CCR = 640 (ARR+1) in the DMA TC interrupt and at boot in `gpio.c`
+
 ### STM32H7 SPI Gotchas
 
 - **NSSP Mode** must be disabled and **MasterKeepIOState** must be enabled —
@@ -62,6 +73,23 @@ hspi1.Init.MasterInterDataIdleness = SPI_MASTER_INTERDATA_IDLENESS_00CYCLE;
   (disable + re-enable peripheral) between transactions to prevent stale data.
 - **Soft reset mid-transaction** leaves the peripheral in an undefined state.
   Follow with `HAL_SPI_DeInit()` + `MX_SPI1_Init()` to recover cleanly.
+
+### STM32H7 DMA / DSHOT Gotchas
+
+- **`HAL_TIM_DMABurst_WriteStart` ignores NDTR** on STM32H7 HAL and runs
+  continuously regardless of Normal mode setting. Do not use it for DSHOT.
+  Use direct DMA register programming instead.
+- **ESC idle-high requirement:** DSHOT signal pins must be driven HIGH from the
+  very first GPIO clock enable. If the pin floats or sits low before TIM4 AF
+  takes over, the ESC misdetects the protocol and fails to arm.
+- **CCR must be forced idle-high after each frame.** With PWM1 mode and
+  `Pulse = 0` (the reset slot value), TIM4 holds the output low between frames.
+  Set `CCR1–CCR4 = ARR+1 = 640` in the DMA transfer-complete ISR to restore
+  idle-high between frames.
+- **DMAMUX** handles DMA request routing on STM32H7. `HAL_DMA_Init()` in
+  `HAL_TIM_Base_MspInit` configures DMAMUX automatically — do not bypass it.
+  The TC interrupt handler in `stm32h7xx_it.c` must return early before calling
+  `HAL_DMA_IRQHandler` when handling TC directly.
 
 ---
 
@@ -149,7 +177,14 @@ WriteReg(0x40, 0x0001);  /* FEATURE_CTRL — enable        */
 ### Post-write Timing
 
 Per BMI323 datasheet: minimum 2 µs idle between transactions.
-At 96 MHz: 200 NOPs ≈ 2.08 µs.
+At 192 MHz: 200 NOPs ≈ 1.04 µs (conservative — confirmed working).
+
+### First-read Gyro Sentinel
+
+On the very first gyro read after boot, the BMI323 may return `0x8000`
+(`-32768` as int16) on all axes — this is the "data not ready" sentinel.
+It self-corrects by the second read. Filter or discard the first sample
+if needed.
 
 ---
 
@@ -240,11 +275,22 @@ CTRL1 = 0x1D
 | M3    | Rear-Right  | CCW  | PD14      |
 | M4    | Rear-Left   | CW   | PD15      |
 
-- **Startup power not yet configured** — awaiting ATmega328P Nano (LUIRSAY,
-  USB-C) for BLHeliSuite passthrough programming
-- To configure: BLHeliSuite → Make Interfaces → Arduino BLHeli Bootloader
-  → 115200 baud → connect ESC signal to D2 → Read Setup →
-  set Startup Power ≥ 1.0 → Write Setup → repeat all 4 ESCs
+### BLHeli_S Configuration (confirmed)
+
+- Firmware: J-H-25, BLHeli_S 16.7
+- Protocol: DSHOT (digital — PPM values ignored)
+- **Demag Compensation:** High (changed from default Low on all 4 ESCs)
+- All other settings: defaults (Startup Power 0.50, Motor Timing Medium,
+  Low RPM Power Protect On)
+- ESC numbering in BLHeliSuite: ESC#1, #3, #4, #7
+- Config backed up to `config/esc_blheli_setup.ini`
+
+### BLHeliSuite 4-Way Interface Setup
+
+- Arduino Nano (ATmega328P) flashed with 4-way interface firmware
+- **Baud: 115200** (default does not work — must select 115200 explicitly)
+- Nano COM port: COM11
+- FC/debug COM port: COM3 (CP2102)
 
 ---
 
@@ -272,3 +318,8 @@ CTRL1 = 0x1D
 - **Magnetometer placement:** Mount the GY-271 away from motors, ESCs, and
   power wires — these are sources of magnetic interference that will corrupt
   heading readings. Calibrate after final mounting position is fixed.
+- **ESC keepalive:** BLHeli_S disarms if no valid DSHOT frame is received for
+  ~250ms. The main loop must call `DSHOT_SendThrottle(0,0,0,0)` every
+  iteration even when not commanding thrust.
+- **STM32 power during ESC work:** Power the STM32 via PDB 5V BEC (not USB-C)
+  whenever ESCs are powered — both must share a common ground reference.
