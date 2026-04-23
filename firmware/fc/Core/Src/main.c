@@ -46,25 +46,25 @@
 /* USER CODE BEGIN PD */
 
 /* ── BMI323 register addresses ──────────────────────────────────────────── */
-#define BMI323_REG_CHIP_ID      0x00
-#define BMI323_REG_ACC_DATA     0x03
-#define BMI323_REG_GYR_DATA     0x06
-#define BMI323_REG_ACC_CONF     0x20
-#define BMI323_REG_GYR_CONF     0x21
-#define BMI323_REG_CMD          0x7E
-#define BMI323_REG_FEATURE_IO0  0x10
-#define BMI323_REG_FEATURE_IO1  0x11
-#define BMI323_REG_FEATURE_IO2  0x12
+#define BMI323_REG_CHIP_ID       0x00
+#define BMI323_REG_ACC_DATA      0x03
+#define BMI323_REG_GYR_DATA      0x06
+#define BMI323_REG_ACC_CONF      0x20
+#define BMI323_REG_GYR_CONF      0x21
+#define BMI323_REG_CMD           0x7E
+#define BMI323_REG_FEATURE_IO0   0x10
+#define BMI323_REG_FEATURE_IO1   0x11
+#define BMI323_REG_FEATURE_IO2   0x12
 #define BMI323_REG_FEATURE_IO_ST 0x14
-#define BMI323_REG_FEATURE_CTRL 0x40
+#define BMI323_REG_FEATURE_CTRL  0x40
 
 /* ── BMI323 configuration values ────────────────────────────────────────── */
-#define BMI323_CMD_SOFT_RESET   0xDEAF
-#define BMI323_ACC_CONF_VAL     0x4028
-#define BMI323_GYR_CONF_VAL     0x4048
+#define BMI323_CMD_SOFT_RESET    0xDEAF
+#define BMI323_ACC_CONF_VAL      0x4028
+#define BMI323_GYR_CONF_VAL      0x4048
 
 /* Loop interval — 10ms = 100Hz */
-#define IMU_LOOP_INTERVAL_MS    10
+#define IMU_LOOP_INTERVAL_MS     10
 
 /* USER CODE END PD */
 
@@ -313,18 +313,18 @@ int main(void)
     mag_cal.offset_y = 0.0f;
     uint8_t mag_chip_id = 0;
     uint8_t mag_result = MAG_Init(&hi2c1, &mag_chip_id);
+    uint8_t mag_ok = (mag_result != MAG_ERR_I2C);
     snprintf(msg, sizeof(msg), "[MAG] chip ID = 0x%02X\r\n", mag_chip_id);
     UART_Print(msg);
-    if (mag_result == MAG_ERR_I2C) {
-        UART_Print("[MAG] INIT FAILED -- I2C error\r\n");
-        Error_Handler();
+    if (!mag_ok) {
+        UART_Print("[MAG] INIT FAILED -- skipping mag reads\r\n");
+    } else {
+        UART_Print("[MAG] QMC5883L ready\r\n");
     }
-    UART_Print("[MAG] QMC5883L ready\r\n");
 
     FLARE_Init();
     UART_Print("[FLARE] PID controller ready\r\n");
 
-    /* Start USART2 interrupt-driven RC reception */
     RC_Init();
     UART_Print("[RC] USART2 receiver ready\r\n");
 
@@ -344,7 +344,7 @@ int main(void)
         BMI323_ReadGyro();
 
         float new_heading;
-        if (MAG_ReadHeading(&hi2c1, &mag_cal, &new_heading) == MAG_OK) {
+        if (mag_ok && MAG_ReadHeading(&hi2c1, &mag_cal, &new_heading) == MAG_OK) {
             mag_heading = new_heading;
         }
 
@@ -360,8 +360,6 @@ int main(void)
         /* ── RC packet consumption ──────────────────────────────────────── */
         FLARE_RC_Packet_t rc_pkt;
         if (RC_GetPacket(&rc_pkt)) {
-            /* New packet arrived this loop iteration — log it for now.
-             * Phase 4 complete: throttle/attitude setpoints wired in Phase 5. */
             snprintf(msg, sizeof(msg),
                      "[RC] arm=%u thr=%u rol=%u pit=%u yaw=%u mode=%u\r\n",
                      rc_pkt.armed,
@@ -371,8 +369,13 @@ int main(void)
             UART_Print(msg);
         }
 
-        FLARE_Update(imu_fusion.roll, imu_fusion.pitch,
-                     gx_dps, gy_dps, gz_dps, 0.01f);
+        if (RC_IsHealthy() && rc_pkt.armed == FLARE_ARMED) {
+            FLARE_Update(imu_fusion.roll, imu_fusion.pitch,
+                         gx_dps, gy_dps, gz_dps, 0.01f);
+            DSHOT_SendThrottle(0, 0, 0, 0);
+        } else {
+            DSHOT_SendThrottle(0, 0, 0, 0); /* keepalive, zero throttle */
+        }
 
         snprintf(msg, sizeof(msg),
                  "A:%6d %6d %6d  G:%6d %6d %6d"
@@ -382,12 +385,6 @@ int main(void)
                  imu_fusion.roll, imu_fusion.pitch, imu_fusion.yaw,
                  RC_IsHealthy() ? "OK" : "LOST");
         UART_Print(msg);
-
-        /*
-         * ESC keepalive — always send zero throttle until Phase 5 wires in
-         * real RC setpoints. Motors stay armed but do not spin.
-         */
-        DSHOT_SendThrottle(0, 0, 0, 0);
 
         HAL_Delay(IMU_LOOP_INTERVAL_MS);
 
@@ -442,10 +439,6 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
-/**
- * @brief  UART RX complete callback — dispatches to RC receiver.
- * @note   Called by HAL from USART2_IRQHandler via HAL_UART_IRQHandler.
- */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART2) {
