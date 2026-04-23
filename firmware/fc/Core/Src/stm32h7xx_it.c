@@ -22,6 +22,7 @@
 #include "stm32h7xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "tim.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -31,7 +32,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define DSHOT_CCR_IDLE  640U   /* ARR+1 → 100% duty → idle-high between frames */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -204,7 +205,21 @@ void SysTick_Handler(void)
 void DMA1_Stream0_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Stream0_IRQn 0 */
+  if (DMA1->LISR & DMA_LISR_TCIF0) {
+    /* Clear transfer-complete flag */
+    DMA1->LIFCR = DMA_LIFCR_CTCIF0;
 
+    /* Stop TIM4 from requesting further DMA bursts */
+    TIM4->DIER &= ~TIM_DIER_UDE;
+
+    /* Hold all 4 outputs idle-high between DSHOT frames */
+    TIM4->CCR1 = DSHOT_CCR_IDLE;
+    TIM4->CCR2 = DSHOT_CCR_IDLE;
+    TIM4->CCR3 = DSHOT_CCR_IDLE;
+    TIM4->CCR4 = DSHOT_CCR_IDLE;
+
+    return; /* skip HAL_DMA_IRQHandler — we handle TC directly */
+  }
   /* USER CODE END DMA1_Stream0_IRQn 0 */
   HAL_DMA_IRQHandler(&hdma_tim4_up);
   /* USER CODE BEGIN DMA1_Stream0_IRQn 1 */
