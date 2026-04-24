@@ -30,7 +30,7 @@
 | STM32H723ZGT6      | PID, sensor fusion, DSHOT motor output, RC packet parsing   |
 | BMI323             | 6-axis IMU (gyro + accel) over SPI1                         |
 | QMC5883L (GY-271)  | 3-axis magnetometer, yaw reference, over I2C1               |
-| ESP32 (quad)       | ESP-NOW receive → UART bridge to STM32 (Phase 4 complete)   |
+| ESP32 (quad)       | ESP-NOW receive → UART bridge to STM32 ✅ flashed & verified |
 | ESP32 (remote)     | Stick ADC read → ESP-NOW transmit, OLED display (Phase 5)   |
 | BLHeli_S 35A ESCs  | Motor drive via DSHOT300                                    |
 
@@ -45,7 +45,7 @@
 | 2.5   | Magnetometer — QMC5883L, yaw fusion               | ✅ Done        |
 | 3     | PID loop — stabilization, DSHOT motor output      | ✅ Done        |
 | 4     | RC link — ESP-NOW, channel parsing, arming        | ✅ Done        |
-| 5     | Remote firmware — sticks, OLED, switches          | 🔲             |
+| 5     | Remote firmware — sticks, OLED, switches          | 🟡 In progress |
 | 6     | Flight testing & tuning                           | 🔲             |
 | 7     | *(Future)* LiDAR mapping — RPLiDAR + Pi companion | 🔲             |
 
@@ -86,12 +86,14 @@ firmware/
 │   ├── CMakePresets.json        # Debug preset — build/Debug/
 │   ├── fc.ioc                   # CubeMX project file
 │   └── .clangd                  # clangd config for VS Code IntelliSense
-├── esp32_quad/                  # Quad-side ESP32 (Phase 4 complete)
+├── esp32_quad/                  # Quad-side ESP32 ✅ flashed & running
 │   ├── src/main.cpp             # ESP-NOW RX → UART bridge to STM32
-│   └── platformio.ini           # lib_extra_dirs = ../../shared
-└── esp32_remote/                # Remote-side ESP32 (Phase 5)
-    ├── src/main.cpp             # Stub
-    └── platformio.ini           # lib_extra_dirs = ../../shared
+│   ├── extra_script.py          # SCons pre-build: injects firmware/shared into CPPPATH
+│   └── platformio.ini           # extra_scripts = pre:extra_script.py
+└── esp32_remote/                # Remote-side ESP32 🟡 built, pending wiring
+    ├── src/main.cpp             # 50Hz ESP-NOW transmitter, stick/switch stubs
+    ├── extra_script.py          # SCons pre-build: injects firmware/shared into CPPPATH
+    └── platformio.ini           # extra_scripts = pre:extra_script.py
 ```
 
 ---
@@ -126,7 +128,7 @@ RC_Init()           — arm USART2 HAL_UART_Receive_IT, begin byte-by-byte RX
   RC_GetPacket()               — consume validated RC packet if available
   if RC healthy and armed:
     FLARE_Update               — PID + motor mixing
-  DSHOT_SendThrottle(0,0,0,0)  — keepalive (zero throttle until Phase 5)
+  DSHOT_SendThrottle(0,0,0,0)  — keepalive (zero throttle until Phase 6)
   UART_Print                   — live telemetry including RC:OK/LOST
 ```
 
@@ -135,8 +137,8 @@ RC_Init()           — arm USART2 HAL_UART_Receive_IT, begin byte-by-byte RX
 ## FLARE RC Protocol
 
 Defined in `firmware/shared/flare_protocol.h` — included by both ESP32
-PlatformIO projects (via `lib_extra_dirs`) and the STM32 CMake build
-(via `get_filename_component(SHARED_INC ...)` in `CMakeLists.txt`).
+PlatformIO projects (via `extra_script.py` SCons hook) and the STM32 CMake
+build (via `get_filename_component(SHARED_INC ...)` in `CMakeLists.txt`).
 
 ### Packet Layout (14 bytes)
 
@@ -148,8 +150,8 @@ PlatformIO projects (via `lib_extra_dirs`) and the STM32 CMake build
 | 5–6     | pitch    | uint16_t   | 1000–2000, center 1500        |
 | 7–8     | yaw      | uint16_t   | 1000–2000, center 1500        |
 | 9       | armed    | uint8_t    | 0 = disarmed, 1 = armed       |
-| 10      | mode     | uint8_t    | 0 = angle, 1 = acro           |
-| 11–12   | reserved | uint8_t[2] | Zero-padded                   |
+| 10      | mode     | uint8_t    | FLARE_MODE_* constants        |
+| 11–12   | reserved | uint8_t[2] | Zero-padded, reserved         |
 | 13      | checksum | uint8_t    | CRC-8/MAXIM over bytes [0–12] |
 
 ### Checksum
@@ -166,6 +168,24 @@ Computed via lookup table in `flare_crc8()`. `flare_checksum()` covers
 - `RC_GetPacket()` — copies shadow buffer to caller, clears flag
 - `RC_IsHealthy()` — returns 1 if last valid packet within `RC_TIMEOUT_MS (250)`
 - `HAL_UART_RxCpltCallback` in `main.c` dispatches to `RC_UART_RxCpltCallback()`
+
+### Shared Header Path Resolution (Windows PlatformIO)
+
+`build_flags = -I<relative>` does not resolve correctly on Windows with
+PlatformIO. Both ESP32 projects use `extra_script.py` (SCons pre-build hook):
+
+```python
+import os
+Import("env")
+shared_path = os.path.abspath(
+    os.path.join(env["PROJECT_DIR"], "..", "shared")
+)
+env.Append(CPPPATH=[shared_path])
+```
+
+`env["PROJECT_DIR"]` is PlatformIO's own guaranteed-correct absolute path to
+the project root. One `..` from `esp32_quad/` or `esp32_remote/` reaches
+`firmware/`, then into `shared/`.
 
 ---
 
@@ -207,6 +227,46 @@ at `0x24000000`. 16 data rows (one bit per row) + 1 reset slot row (all zeros).
 
 ---
 
+## ESP32 Remote Firmware Architecture (Phase 5 — in progress)
+
+### esp32_remote/src/main.cpp — 50Hz transmitter
+
+```
+setup():
+  Serial.begin(115200)
+  pinMode ARM_SWITCH, MODE_SWITCH → INPUT_PULLUP
+  WiFi.mode(WIFI_STA), disconnect
+  esp_now_init()
+  esp_now_register_send_cb(on_packet_sent)
+  esp_now_add_peer(kQuadMac)   ← E4:B0:63:AF:0F:3C
+
+loop() at 50Hz:
+  analogRead() × 4 axes → map_stick() → 1000–2000
+  digitalRead() × 2 switches → armed / mode flags
+  build FLARE_RC_Packet_t
+  flare_checksum() → pkt.checksum
+  esp_now_send(kQuadMac, &pkt, 14)
+
+every 5s:
+  Serial.printf tx_ok / tx_fail counters
+```
+
+### Stick Mapping (map_stick())
+
+- Raw ADC 12-bit (0–4095) clamped to `[ADC_MIN, ADC_MAX]` (calibration TBD)
+- Deadband `ADC_DEADBAND` counts around center → snaps to center value
+- `map()` to `[FLARE_CH_MIN, FLARE_CH_MAX]` = `[1000, 2000]`
+- `reversed` parameter per axis (TBD after wiring)
+
+### Pending Before Flash
+- Wire M7 gimbals → assign GPIO ADC pins, update `PIN_THROTTLE/YAW/PITCH/ROLL`
+- Wire arm + mode switches → update `PIN_ARM_SWITCH`, `PIN_MODE_SWITCH`
+- Measure per-axis ADC min/center/max → update `ADC_MIN`, `ADC_MAX`
+- Determine axis reversal per gimbal orientation → update `reversed` args
+- Wire SSD1309 OLED (SPI) → add display driver (OLED arriving tomorrow)
+
+---
+
 ## Toolchain
 
 | Tool                  | Version  | Purpose                          |
@@ -222,19 +282,28 @@ at `0x24000000`. 16 data rows (one bit per row) + 1 reset slot row (all zeros).
 ### Build & Flash
 
 ```powershell
-# Build (from firmware/fc/)
+# STM32 — build (from firmware/fc/)
 cmake --build --preset Debug
 
-# Flash
+# STM32 — flash
 & "C:\Program Files\STMicroelectronics\STM32Cube\STM32CubeProgrammer\bin\STM32_Programmer_CLI.exe" `
   -c port=SWD freq=100 reset=HWrst -w build/Debug/fc.elf -rst
 
-# RAM read (for variable inspection without UART)
+# STM32 — RAM read (for variable inspection without UART)
 & "C:\Program Files\STMicroelectronics\STM32Cube\STM32CubeProgrammer\bin\STM32_Programmer_CLI.exe" `
   -c port=SWD freq=100 -r32 <address> <length>
 
 # Find variable addresses
 arm-none-eabi-nm build/Debug/fc.elf | Select-String "variable_name"
+
+# ESP32 — build (from firmware/esp32_quad/ or esp32_remote/)
+C:\Users\alexg\.platformio\penv\Scripts\platformio.exe run --environment arduino_nano_esp32
+
+# ESP32 — flash (double-tap RST first)
+C:\Users\alexg\.platformio\penv\Scripts\platformio.exe run --target upload --environment arduino_nano_esp32
+
+# ESP32 — serial monitor
+C:\Users\alexg\.platformio\penv\Scripts\platformio.exe device monitor --environment arduino_nano_esp32 --baud 115200
 ```
 
 ### CMake shared include path

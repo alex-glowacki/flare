@@ -297,9 +297,10 @@ CTRL1 = 0x1D
 
 ---
 
-## Nano ESP32 (Quad-side)
+## Nano ESP32 (Quad-side) ✅ Flashed & Running
 
 - **Role:** ESP-NOW receiver → UART bridge to STM32
+- **MAC address: `E4:B0:63:AF:0F:3C`** — required for remote peer config
 - **UART wiring:**
 
 | ESP32 Pin   | Direction | STM32 Pin        |
@@ -308,7 +309,46 @@ CTRL1 = 0x1D
 | GND         | shared    | GND              |
 
 - GPIO18 (RX) wired to PA2 (USART2 TX) but unused in Phase 4
-- MAC address logged at boot for pairing with remote ESP32
+- Boot output confirms MAC address, ESP-NOW ready, 5s diagnostic loop
+
+### Windows DFU Flash Note
+
+First flash on a new Windows machine requires installing the Nano ESP32 board
+package through Arduino IDE once — this provisions the WinUSB DFU driver that
+PlatformIO's `dfu-util` needs. After that initial install, PlatformIO uploads
+work standalone without Arduino IDE.
+
+To enter DFU mode: double-tap the RST button. The RGB LED changes to indicate
+DFU mode. Then immediately run the PlatformIO upload command.
+
+---
+
+## Nano ESP32 (Remote-side) 🟡 Firmware Built — Pending Wiring
+
+- **Role:** Read M7 hall sensor gimbals + switches → transmit FLARE_RC_Packet_t to quad ESP32 via ESP-NOW at 50Hz
+- **Target peer MAC:** `E4:B0:63:AF:0F:3C` (hardcoded in firmware)
+- **Pin assignments:** TBD — update `firmware/esp32_remote/src/main.cpp` once wired
+
+### Planned Hardware
+
+| Component | Part | Notes |
+|-----------|------|-------|
+| Gimbals   | FrSky M7 Hall Sensor (×2) | Analog output, 4 axes, 0–3.3V |
+| OLED      | HiLetgo 2.42" SSD1309 128×64 SPI | Arriving — use SPI 7-pin variant |
+| Arm switch | 2-position ON-ON toggle | INPUT_PULLUP, LOW = armed |
+| Mode switch | 2-position ON-ON toggle | INPUT_PULLUP, LOW = acro |
+
+### ADC Calibration (TBD after wiring)
+
+```cpp
+#define ADC_MIN      100    // measure at stick minimum
+#define ADC_MAX      4000   // measure at stick maximum
+#define ADC_DEADBAND 40     // raw counts either side of center
+```
+
+Measure with `Serial.printf` of raw `analogRead()` at stick extremes per axis.
+Update `reversed` parameter in `map_stick()` calls per axis after confirming
+direction.
 
 ---
 

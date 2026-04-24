@@ -16,7 +16,7 @@ systems learning project.
 | 2.5   | Magnetometer — QMC5883L, yaw fusion               | ✅ Done |
 | 3     | PID loop — stabilization, DSHOT motor output      | ✅ Done |
 | 4     | RC link — ESP-NOW, channel parsing, arming        | ✅ Done |
-| 5     | Remote firmware — sticks, OLED, switches          | 🔲      |
+| 5     | Remote firmware — sticks, OLED, switches          | 🟡 In progress |
 | 6     | Flight testing & tuning                           | 🔲      |
 | 7     | *(Future)* LiDAR mapping — RPLiDAR + Pi companion | 🔲      |
 
@@ -80,8 +80,15 @@ systems learning project.
 
 ### RC Link
 - Nano ESP32 modules (ESP-NOW, quad-side and remote)
-- Quad-side ESP32 GPIO17 (TX) → STM32 PA3 (USART2 RX)
+- Quad-side ESP32: **MAC `E4:B0:63:AF:0F:3C`**, GPIO17 (TX) → STM32 PA3 (USART2 RX)
+- Remote ESP32: FrSky M7 Hall Sensor Gimbals (×2), 2-position toggle switches for arm/mode
 - Shared GND between ESP32 and STM32
+
+### Remote Controller Hardware (Phase 5 — in progress)
+- **Gimbals:** FrSky M7 Hall Sensor (×2) — analog, 4 axes total
+- **OLED:** HiLetgo 2.42" SSD1309 128×64, SPI 7-pin (arriving)
+- **Switches:** 2-position toggle — arming (dedicated), mode angle/acro (dedicated)
+- Pin assignments TBD pending wiring
 
 ### Debug / Programming
 - ST-Link V2 clone (V2J37S7) — SWD, CLI only
@@ -120,14 +127,18 @@ flare/
 │   │   ├── CMakeLists.txt
 │   │   └── build/Debug/           # Build output (gitignored)
 │   ├── esp32_quad/                # ESP-NOW quad-side firmware (PlatformIO)
-│   │   ├── src/main.cpp           # ESP-NOW RX → UART bridge to STM32
+│   │   ├── src/main.cpp           # ESP-NOW RX → UART bridge to STM32 ✅ flashed
+│   │   ├── extra_script.py        # SCons path injection for shared header
 │   │   └── platformio.ini
 │   └── esp32_remote/              # ESP-NOW remote firmware (PlatformIO)
-│       ├── src/main.cpp           # Stub — Phase 5
+│       ├── src/main.cpp           # 50Hz transmitter stub — pending wiring
+│       ├── extra_script.py        # SCons path injection for shared header
 │       └── platformio.ini
 ├── config/
 │   └── esc_blheli_setup.ini       # BLHeli_S ESC configuration backup
 └── docs/
+    ├── architecture.md
+    ├── hardware-notes.md
     └── session_summaries/         # Per-session progress logs
 ```
 
@@ -148,7 +159,7 @@ flare/
 
 ## Build & Flash
 
-Working directory: `firmware/fc`
+### STM32 (working directory: `firmware/fc`)
 
 **Build:**
 ```powershell
@@ -159,6 +170,27 @@ cmake --build --preset Debug
 ```powershell
 & "C:\Program Files\STMicroelectronics\STM32Cube\STM32CubeProgrammer\bin\STM32_Programmer_CLI.exe" -c port=SWD freq=100 reset=HWrst -w build/Debug/fc.elf -rst
 ```
+
+### ESP32 (working directory: `firmware/esp32_quad` or `firmware/esp32_remote`)
+
+**Build:**
+```powershell
+C:\Users\alexg\.platformio\penv\Scripts\platformio.exe run --environment arduino_nano_esp32
+```
+
+**Flash** (double-tap RST first to enter DFU mode):
+```powershell
+C:\Users\alexg\.platformio\penv\Scripts\platformio.exe run --target upload --environment arduino_nano_esp32
+```
+
+**Serial monitor:**
+```powershell
+C:\Users\alexg\.platformio\penv\Scripts\platformio.exe device monitor --environment arduino_nano_esp32 --baud 115200
+```
+
+> **Note:** First flash on a new Windows machine requires installing the Arduino
+> Nano ESP32 board through Arduino IDE once to provision the DFU driver.
+> After that, PlatformIO uploads work without Arduino IDE.
 
 **clangd compile commands** are exported automatically via
 `CMAKE_EXPORT_COMPILE_COMMANDS=TRUE` and pointed at `build/Debug` in `.clangd`.
@@ -275,13 +307,36 @@ Total: **14 bytes**. Shared header used by both ESP32 and STM32 firmware.
 - `RC_IsHealthy()` — returns 1 if packet received within `RC_TIMEOUT_MS` (250ms)
 - USART2 IRQ priority: 8,0 (below DMA1_Stream0 at 0,0)
 
-### ESP32 quad-side firmware (esp32_quad/src/main.cpp)
+### ESP32 quad-side firmware (esp32_quad/src/main.cpp) ✅ flashed
 
 - ESP-NOW receiver, Station mode
+- MAC address: **`E4:B0:63:AF:0F:3C`**
 - `on_packet_received()` callback: validates magic + length + CRC, forwards
   raw 14-byte packet over UART to STM32
 - UART: GPIO17 (TX) → STM32 PA3, 115200 baud
 - Diagnostics printed every 5 seconds: `rx_ok` / `rx_bad` counters
+
+### ESP32 remote-side firmware (esp32_remote/src/main.cpp) 🟡 built, pending wiring
+
+- ESP-NOW transmitter targeting `E4:B0:63:AF:0F:3C`
+- 50Hz transmit loop, ADC stick read, deadband, CRC-8 checksum
+- Pin assignments placeholders — update once hardware is wired
+- Arming and mode via `INPUT_PULLUP` toggle switches (LOW = active)
+
+### Shared header path resolution (Windows PlatformIO)
+
+Both ESP32 projects use `extra_script.py` (SCons pre-build hook) to inject
+the absolute path to `firmware/shared/` into `CPPPATH`:
+
+```python
+shared_path = os.path.abspath(
+    os.path.join(env["PROJECT_DIR"], "..", "shared")
+)
+env.Append(CPPPATH=[shared_path])
+```
+
+`platformio.ini` references it via `extra_scripts = pre:extra_script.py`.
+Relative `build_flags = -I` paths do not resolve correctly on Windows.
 
 ---
 
@@ -425,6 +480,7 @@ Examples:
 feat(shared): add flare_protocol.h — RC packet definition, CRC-8/MAXIM checksum
 feat(fc/rc): add USART2 interrupt-driven RC receiver (rc.c, rc.h)
 fix(fc/dshot): wait for DMA stream disable instead of force-aborting transfer
-fix(fc/mag): add QMC5883L_CHIP_ID validation, skip reads when sensor absent
-docs: update all docs for Phase 4 completion
+fix(esp32_quad): correct shared header path in extra_script.py
+feat(esp32_remote): implement ESP-NOW transmitter at 50Hz with stick/switch stubs
+docs: update all docs for Phase 5 progress
 ```
