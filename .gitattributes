@@ -15,3 +15,7 @@
 
 # Force CRLF for Windows batch files
 *.bat text eol=crlf
+
+# Binary and AutoCAD files
+*.stl binary
+*.dwg binary
