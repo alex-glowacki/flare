@@ -28,7 +28,7 @@
       "editor.defaultFormatter": null,
     },
     "[cpp]": {
-      "editor.defaultFormatter": null,
+      "editor.defaultFormatter": "xaver.clang-format",
     },
 
     "editor.formatOnSave": true,
