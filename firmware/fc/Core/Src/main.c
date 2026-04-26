@@ -369,7 +369,7 @@ int main(void)
             UART_Print(msg);
         }
 
-        if (RC_IsHealthy() && rc_pkt.armed == FLARE_ARMED) {
+        if (RC_IsHealthy() && rc_pkt.armed == FLARE_ARMED && rc_pkt.mode != FLARE_MODE_SAFE) {
             FLARE_Update(imu_fusion.roll, imu_fusion.pitch,
                          gx_dps, gy_dps, gz_dps, 0.01f);
             DSHOT_SendThrottle(0, 0, 0, 0);
