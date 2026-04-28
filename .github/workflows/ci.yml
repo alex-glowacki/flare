@@ -7,6 +7,7 @@ on:
     branches: [main]
     paths:
       - "firmware/fc/**"
+      - "firmware/shared/**"
       - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
