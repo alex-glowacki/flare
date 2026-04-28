@@ -22,6 +22,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// static_assert is a keyword in C++11 but requires <assert.h> in C11
+#ifndef __cplusplus
+#include <assert.h>
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -30,68 +35,47 @@ extern "C" {
 // Protocol constants
 // ---------------------------------------------------------------------------
 
-#define FLARE_PACKET_MAGIC 0xAFU /* sync byte - identifies FLARE packets */
-#define FLARE_PACKET_SIZE 14U    /* total packet size in bytes */
-#define FLARE_PACKET_DATA_LEN                                                  \
-  13U /* bytes covered by CRC (everything but checksum) */
+#define FLARE_PACKET_MAGIC 0xAFU
+#define FLARE_PACKET_SIZE 14U
+#define FLARE_PACKET_DATA_LEN 13U
 
-/* Channel range */
 #define FLARE_CH_MIN 1000U
 #define FLARE_CH_MID 1500U
 #define FLARE_CH_MAX 2000U
 
-/* Armed flag */
 #define FLARE_ARMED 1U
 #define FLARE_DISARMED 0U
 
-/* Flight mode
- * FLARE_MODE_SAFE: switch in center/off position — treated as disarmed
- * regardless of arm switch state. Requires deliberate mode selection
- * (ANGLE or ACRO) before the FC will arm. */
-#define FLARE_MODE_ANGLE 0U /* self-levelling (angle mode) */
-#define FLARE_MODE_ACRO 1U  /* rate mode (acro) */
-#define FLARE_MODE_SAFE 2U  /* center/off position — forces disarm on FC */
+#define FLARE_MODE_ANGLE 0U
+#define FLARE_MODE_ACRO 1U
+#define FLARE_MODE_SAFE 2U
 
 // ---------------------------------------------------------------------------
 // Packet struct
-//
-// __attribute__((packed)) ensures no padding bytes are inserted by the
-// compiler. Both ESP32 targets are little-endian — multi-byte fields
-// transmit LSB first, which is consistent across both ends.
 // ---------------------------------------------------------------------------
 
 typedef struct __attribute__((packed)) {
-  uint8_t magic;     /* 0xAF */
-  uint16_t throttle; /* 1000-2000, 1000 = motors off */
-  uint16_t roll;     /* 1000-2000, 1500 = center */
-  uint16_t pitch;    /* 1000-2000, 1500 = center */
-  uint16_t yaw;      /* 1000-2000, 1500 = center */
-  uint8_t armed;     /* FLARE_ARMED / FLARE_DISARMED */
-  uint8_t mode;      /* FLARE_MODE_ANGLE / FLARE_MODE_ACRO / FLARE_MODE_SAFE */
-  uint8_t reserved[2]; /* zero-pad - reserved for future channels */
-  uint8_t checksum;    /* CRC-8/MAXIM over bytes [0-12] */
+  uint8_t magic;
+  uint16_t throttle;
+  uint16_t roll;
+  uint16_t pitch;
+  uint16_t yaw;
+  uint8_t armed;
+  uint8_t mode;
+  uint8_t reserved[2];
+  uint8_t checksum;
 } FLARE_RC_Packet_t;
 
-// Compile-time size guard — catches struct padding bugs immediately.
-// static_assert works in both C++11 and C11 (unlike _Static_assert which
-// is C-only). Both ESP32 PlatformIO projects compile as C++, so use this form.
+// Compile-time size guard.
+// static_assert is a keyword in C++11; in C11 it expands via <assert.h>.
 static_assert(sizeof(FLARE_RC_Packet_t) == FLARE_PACKET_SIZE,
               "FLARE_RC_Packet_t size mismatch - check for padding");
 
 // ---------------------------------------------------------------------------
 // CRC-8/MAXIM (Dallas/Maxim 1-Wire CRC)
-//   Polynomial : 0x31 (x^8 + x^5 + x^4 + 1), reflected
-//   Init       : 0x00
-//   RefIn/Out  : true
-//   XorOut     : 0x00
-//
-// Computed byte-by-byte with a lookup table for speed. The table is
-// defined as a static const array inside the inline function to keep
-// this header self-contained (no separate .c file required).
 // ---------------------------------------------------------------------------
 
 static inline uint8_t flare_crc8(const uint8_t *data, size_t len) {
-  /* CRC-8/MAXIM lookup table - generated for polynomial 0x31 reflected */
   static const uint8_t kCrcTable[256] = {
       0x00, 0x5E, 0xBC, 0xE2, 0x61, 0x3F, 0xDD, 0x83, 0xC2, 0x9C, 0x7E, 0x20,
       0xA3, 0xFD, 0x1F, 0x41, 0x9D, 0xC3, 0x21, 0x7F, 0xFC, 0xA2, 0x40, 0x1E,
@@ -123,19 +107,6 @@ static inline uint8_t flare_crc8(const uint8_t *data, size_t len) {
   }
   return crc;
 }
-
-// ---------------------------------------------------------------------------
-// flare_checksum() — compute the CRC-8 checksum for a packet
-//
-// Covers all bytes except the checksum field itself (bytes [0–12]).
-// Call this to both populate and verify the checksum field.
-//
-// Usage (populate):
-//   pkt.checksum = flare_checksum(&pkt);
-//
-// Usage (verify):
-//   if (pkt.checksum != flare_checksum(&pkt)) { /* reject */ }
-// ---------------------------------------------------------------------------
 
 static inline uint8_t flare_checksum(const FLARE_RC_Packet_t *pkt) {
   return flare_crc8((const uint8_t *)pkt, FLARE_PACKET_DATA_LEN);
