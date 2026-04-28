@@ -22,7 +22,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -73,9 +72,11 @@ typedef struct __attribute__((packed)) {
   uint8_t checksum;    /* CRC-8/MAXIM over bytes [0-12] */
 } FLARE_RC_Packet_t;
 
-// Compile-time size guard - catches struct padding bugs immediately
-_Static_assert(sizeof(FLARE_RC_Packet_t) == FLARE_PACKET_SIZE,
-               "FLARE_RC_Packet_t size mismatch - check for padding");
+// Compile-time size guard — catches struct padding bugs immediately.
+// static_assert works in both C++11 and C11 (unlike _Static_assert which
+// is C-only). Both ESP32 PlatformIO projects compile as C++, so use this form.
+static_assert(sizeof(FLARE_RC_Packet_t) == FLARE_PACKET_SIZE,
+              "FLARE_RC_Packet_t size mismatch - check for padding");
 
 // ---------------------------------------------------------------------------
 // CRC-8/MAXIM (Dallas/Maxim 1-Wire CRC)
