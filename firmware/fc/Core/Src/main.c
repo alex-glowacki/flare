@@ -322,7 +322,7 @@ int main(void)
     if (!mag_ok) {
         UART_Print("[MAG] INIT FAILED -- skipping mag reads\r\n");
     } else {
-        UART_Print("[MAG] QMC5883L ready\r\n");
+        UART_Print("[MAG] QMC5883P ready\r\n");
     }
 
     FLARE_Init();
