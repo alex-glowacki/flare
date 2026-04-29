@@ -23,13 +23,20 @@ static const uint8_t kQuadMac[6] = {0x20, 0x6E, 0xF1, 0x32, 0x70, 0x3C};
 
 // ---------------------------------------------------------------------------
 // Pin assignments — sticks and switches
+//
+// Both gimbals are mounted 90° rotated from their default orientation.
+// Pin assignments are swapped here at the source to compensate, so all
+// downstream code (packet fields, STM32 mapping) remains semantically correct.
+//
+//   Left gimbal:  throttle ← X-axis (A1), yaw ← Y-axis (A0)
+//   Right gimbal: roll     ← Y-axis (A2), pitch ← X-axis (A3)
 // ---------------------------------------------------------------------------
 
 // Analog stick axes (0-4095 ADC, 12-bit)
-#define PIN_THROTTLE A0  // left gimbal Y-axis
-#define PIN_YAW A1       // left gimbal X-axis
-#define PIN_PITCH A2     // right gimbal Y-axis
-#define PIN_ROLL A3      // right gimbal X-axis
+#define PIN_THROTTLE A1  // left gimbal X-axis  (was A0 pre-rotation)
+#define PIN_YAW A0       // left gimbal Y-axis  (was A1 pre-rotation)
+#define PIN_PITCH A3     // right gimbal X-axis (was A2 pre-rotation)
+#define PIN_ROLL A2      // right gimbal Y-axis (was A3 pre-rotation)
 
 // Digital switches (INPUT_PULLUP — LOW = active)
 #define PIN_ARM_SWITCH D12    // arming toggle switch — ON = armed
@@ -64,12 +71,15 @@ static U8G2_SSD1309_128X64_NONAME0_F_4W_HW_SPI u8g2(U8G2_R0, PIN_OLED_CS,
 // ---------------------------------------------------------------------------
 // ADC calibration — per axis, measured on hardware
 //
-// Throttle (A0): no spring center — ADC_CENTER unused for this axis
-// Yaw     (A1): spring centered
-// Pitch   (A2): spring centered
-// Roll    (A3): spring centered
+// Throttle (A1): no spring center — ADC_CENTER unused for this axis
+// Yaw     (A0): spring centered
+// Pitch   (A3): spring centered
+// Roll    (A2): spring centered
 //
 // Deadband applied around center in raw ADC counts.
+//
+// NOTE: cal values are per physical axis — update these after remounting
+//       if ADC min/center/max readings change on the swapped pins.
 // ---------------------------------------------------------------------------
 struct AxisCal {
     uint16_t min;
@@ -81,10 +91,10 @@ struct AxisCal {
 
 // min, center, max, deadband, reversed
 static const AxisCal kThrottle = {265, 0, 3869, 0,
-                                  false};  // A0 - no center/deadband
-static const AxisCal kYaw = {253, 1756, 3418, 40, false};   // A1
-static const AxisCal kPitch = {38, 1622, 3129, 40, false};  // A2
-static const AxisCal kRoll = {251, 1799, 3647, 40, false};  // A3
+                                  false};  // A1 - no center/deadband
+static const AxisCal kYaw = {253, 1756, 3418, 40, false};   // A0
+static const AxisCal kPitch = {38, 1622, 3129, 40, false};  // A3
+static const AxisCal kRoll = {251, 1799, 3647, 40, false};  // A2
 
 // ---------------------------------------------------------------------------
 // Diagnostics
@@ -186,7 +196,6 @@ static void update_display() {
     u8g2.setCursor(0, 12);
     u8g2.print("FLARE");
     u8g2.setCursor(48, 12);
-    // Show SAFE if mode switch is centered, regardless of arm switch
     u8g2.print(!armed ? "DISARMED" : (safe ? "SAFE" : "** ARMED **"));
 
     // Divider
