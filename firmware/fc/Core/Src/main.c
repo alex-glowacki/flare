@@ -375,10 +375,26 @@ int main(void)
         }
 
         if (RC_IsHealthy() && rc_pkt.armed == FLARE_ARMED && rc_pkt.mode != FLARE_MODE_SAFE) {
+            /*
+             * Map RC channels [1000, 2000] to physical setpoints.
+             * Centre stick = 1500 = zero setpoint.
+             * Roll/pitch:  ±500 counts → ±30 degrees
+             * Yaw rate:    ±500 counts → ±200 dps
+             *
+             * Throttle passed raw — FLARE_Update clamps to DSHOT range [48, 2047].
+             */
+            FLARE_SetRollSP   (((float)rc_pkt.roll    - 1500.0f) * (30.0f  / 500.0f));
+            FLARE_SetPitchSP  (((float)rc_pkt.pitch   - 1500.0f) * (30.0f  / 500.0f));
+            FLARE_SetYawRateSP(((float)rc_pkt.yaw     - 1500.0f) * (200.0f / 500.0f));
+            FLARE_SetThrottle (rc_pkt.throttle);
+            FLARE_SetArmed(1);
+
             FLARE_Update(imu_fusion.roll, imu_fusion.pitch,
                          gx_dps, gy_dps, gz_dps, 0.01f);
-            DSHOT_SendThrottle(0, 0, 0, 0);
         } else {
+            /* Disarmed or RC lost — zero everything and send disarm frames */
+            FLARE_SetArmed(0);
+            FLARE_SetThrottle(0);
             DSHOT_SendThrottle(0, 0, 0, 0);
         }
 
