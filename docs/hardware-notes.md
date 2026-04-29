@@ -305,7 +305,7 @@ CTRL1 = 0x1D
 
 | ESP32 Pin   | Direction | STM32 Pin        |
 |-------------|-----------|------------------|
-| GPIO17 (TX) | →         | PA3 (USART2 RX)  |
+| GPIO17 / A0 (TX) | →         | PA3 (USART2 RX)  |
 | GND         | shared    | GND              |
 
 - GPIO18 (RX) wired to PA2 (USART2 TX) but unused in Phase 4
