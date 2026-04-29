@@ -164,7 +164,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
   /* USER CODE BEGIN USART2_MspInit 1 */
     /* NVIC inside USER CODE so CubeMX cannot wipe it on regen */
-    HAL_NVIC_SetPriority(USART2_IRQn, 0, 0);
+    HAL_NVIC_SetPriority(USART2_IRQn, 8, 0);
     HAL_NVIC_EnableIRQ(USART2_IRQn);
   /* USER CODE END USART2_MspInit 1 */
   }
