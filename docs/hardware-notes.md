@@ -146,19 +146,15 @@ hspi1.Init.MasterInterDataIdleness = SPI_MASTER_INTERDATA_IDLENESS_00CYCLE;
 ### SPI Protocol
 
 **Read (4 bytes):**
-```
 TX: [addr | 0x80]  [0x00 dummy]  [0x00]  [0x00]
 RX: [ignored]      [ignored]     [LSB]   [MSB]
-```
 Reconstruction: `(uint16_t)(rx[2] | (rx[3] << 8))`
 
 For 1-byte registers (e.g. WHO_AM_I), rx[3] contains garbage — mask:
 `who_am_i & 0x00FF`
 
 **Write (4 bytes — padded):**
-```
 TX: [addr & 0x7F]  [data_LSB]  [data_MSB]  [0x00 dummy]
-```
 The BMI323 clocks in the first 3 bytes and ignores the trailing dummy.
 4-byte padding is required due to the STM32H7 3-byte truncation bug above.
 
@@ -192,55 +188,74 @@ WriteReg(0x40, 0x0001);  /* FEATURE_CTRL — enable        */
 
 ### Register Map (used registers)
 
-| Register       | Address | Notes                              |
-|----------------|---------|------------------------------------|
-| CHIP_ID        | 0x00    | WHO_AM_I — low byte = 0x43         |
-| ACC_DATA_X     | 0x03    | Burst read 6 bytes for X/Y/Z       |
-| GYR_DATA_X     | 0x06    | Burst read 6 bytes for X/Y/Z       |
-| ACC_CONF       | 0x20    | Default 0x0028, target 0x4028      |
-| GYR_CONF       | 0x21    | Default 0x0028, target 0x4048      |
-| FEATURE_IO0    | 0x10    |                                    |
-| FEATURE_IO1    | 0x11    | Poll for feature engine ready      |
-| FEATURE_IO2    | 0x12    |                                    |
-| FEATURE_IO_ST  | 0x14    |                                    |
-| FEATURE_CTRL   | 0x40    |                                    |
-| CMD            | 0x7E    | Soft reset: write 0xDEAF           |
-
-### Post-write Timing
-
-Per BMI323 datasheet: minimum 2 µs idle between transactions.
-At 192 MHz: 200 NOPs ≈ 1.04 µs (conservative — confirmed working).
-
-### First-read Gyro Sentinel
-
-On the very first gyro read after boot, the BMI323 may return `0x8000`
-(`-32768` as int16) on all axes — this is the "data not ready" sentinel.
-It self-corrects by the second read. Filter or discard the first sample
-if needed.
+| Register        | Address | Notes                                         |
+|-----------------|---------|-----------------------------------------------|
+| CHIP_ID         | 0x00    | Returns 0x43                                  |
+| ACC_DATA        | 0x03    | Burst read 6 bytes for X/Y/Z accel (LSB first)|
+| GYR_DATA        | 0x06    | Burst read 6 bytes for X/Y/Z gyro (LSB first) |
+| FEATURE_IO0     | 0x10    | Feature engine config                         |
+| FEATURE_IO1     | 0x11    | Feature engine status (poll bit[3:0] == 0x01) |
+| FEATURE_IO2     | 0x12    | Feature engine startup config                 |
+| FEATURE_IO_ST   | 0x14    | Feature engine trigger                        |
+| ACC_CONF        | 0x20    | Accel mode, ODR, range                        |
+| GYR_CONF        | 0x21    | Gyro mode, ODR, range                         |
+| FEATURE_CTRL    | 0x40    | Feature engine enable                         |
+| CMD             | 0x7E    | Soft reset (write 0xDEAF)                     |
 
 ---
 
-## QMC5883L Magnetometer (FORIOT GY-271 — Amazon B0CFLPKTP1)
+## GY-271 Magnetometer (QMC5883P)
 
-- **Interface:** I2C (400 kHz Fast Mode)
-- **VCC:** 3.3V — do NOT connect to 5V
-- **Chip marking:** `HP 5883 5803` — QMC5883L-compatible register map
-- **Module has onboard pull-up resistors** — no external resistors needed
+> ⚠️ The GY-271 module sold as "QMC5883L" on Amazon (B0CFLPKTP1) actually
+> contains a **QMC5883P** — a completely different chip with a different
+> register map. The two are not compatible. The driver has been written
+> for the QMC5883P specifically.
 
 ### I2C Address
 
-- **Expected (QMC5883L default):** `0x0D`
-- **Actual on this module:** `0x2C` — ADDR pin is pulled high on the PCB
+- **Default:** `0x2C` — ADDR pin is pulled high on the PCB
 - **HAL 8-bit shifted address:** `0x2C << 1 = 0x58`
 
 ### Chip ID
 
-- **QMC5883L spec:** register `0x0D` returns `0xFF`
-- **This module:** returns `0x00`
-- **Driver behaviour:** `MAG_Init()` validates chip ID against
-  `QMC5883L_CHIP_ID (0xFF)`. Mismatch sets `mag_ok = 0` in `main.c` and
-  all subsequent `MAG_ReadHeading()` calls are skipped. This prevents the
-  20ms DRDY poll timeout from stalling the 100Hz loop when the mag is absent.
+- **Register:** `0x00`
+- **Expected value:** `0x80` ✅ confirmed on hardware
+- **QMC5883L comparison:** QMC5883L uses register `0x0D` → `0xFF` — completely different
+
+### Register Map (used registers)
+
+| Register | Address | Notes                                          |
+|----------|---------|------------------------------------------------|
+| CHIP_ID  | 0x00    | Returns 0x80                                   |
+| XOUT_L   | 0x01    | Burst read 6 bytes for X/Y/Z (LSB first)      |
+| XOUT_H   | 0x02    |                                                |
+| YOUT_L   | 0x03    |                                                |
+| YOUT_H   | 0x04    |                                                |
+| ZOUT_L   | 0x05    |                                                |
+| ZOUT_H   | 0x06    |                                                |
+| STATUS   | 0x09    | Bit 0 = DRDY (data ready), Bit 1 = OVL        |
+| CTRL     | 0x0A    | Mode, ODR, RNG, OSR config                    |
+
+> ⚠️ QMC5883P has **no FBR register** (0x0B). Do not write to it.
+> Writing 0x0B on this chip targets an undefined/reserved register.
+
+### CTRL Configuration (0x0A)
+CTRL = 0x09
+OSR1[7:6] = 00  → Over-sample ratio 1 (low power)
+RNG[5:4]  = 00  → ±30 Gauss full scale
+ODR[3:2]  = 10  → 100 Hz output data rate
+MODE[1:0] = 01  → Normal mode (continuous measurement)
+
+### Initialization Sequence
+
+1. Read CHIP_ID at `0x00` — validate against `0x80`; abort on mismatch
+2. Write CTRL (`0x0A`) = `0x09` — enable normal mode at 100 Hz
+
+### Data Format
+
+- 6 bytes burst read from `0x01`: XL, XH, YL, YH, ZL, ZH
+- Each axis: 16-bit signed, little-endian (LSB first), 2's complement
+- Reconstruction: `(int16_t)(buf[0] | (buf[1] << 8))` for X, etc.
 
 ### Wiring (GY-271 → FK723M1)
 
@@ -252,39 +267,6 @@ if needed.
 | Brown      | GND        | GND         |
 
 DRDY pin not connected — polling used instead.
-
-### Register Map (used registers)
-
-| Register | Address | Notes                                      |
-|----------|---------|--------------------------------------------|
-| XOUT_L   | 0x00    | Burst read 6 bytes for X/Y/Z (LSB first)  |
-| STATUS   | 0x06    | Bit 0 = DRDY (data ready)                 |
-| CTRL1    | 0x09    | Mode, ODR, RNG, OSR config                |
-| CTRL2    | 0x0A    | Soft reset, pointer roll-over             |
-| FBR      | 0x0B    | SET/RESET period — must write 0x01 first  |
-| CHIP_ID  | 0x0D    | Returns 0x00 on this module (expect 0xFF) |
-
-### CTRL1 Configuration
-
-```
-CTRL1 = 0x1D
-  OSR[7:6] = 00  → Over-sample ratio 512 (lowest noise)
-  RNG[5:4] = 01  → ±8 Gauss full scale
-  ODR[3:2] = 11  → 200 Hz output data rate
-  MODE[1:0]= 01  → Continuous measurement mode
-```
-
-### Initialization Sequence
-
-1. Read CHIP_ID at `0x0D` — validate against `0xFF`; return `MAG_ERR_I2C` on mismatch
-2. Write FBR (`0x0B`) = `0x01` — required by datasheet before continuous mode
-3. Write CTRL1 (`0x09`) = `0x1D` — enable continuous measurement
-
-### Data Format
-
-- 6 bytes burst read from `0x00`: XL, XH, YL, YH, ZL, ZH
-- Each axis: 16-bit signed, little-endian (LSB first), 2's complement
-- Reconstruction: `(int16_t)(buf[0] | (buf[1] << 8))` for X, etc.
 
 ### Calibration Status
 
@@ -303,10 +285,10 @@ CTRL1 = 0x1D
 - **MAC address: `20:6E:F1:32:70:3C`** — required for remote peer config
 - **UART wiring:**
 
-| ESP32 Pin   | Direction | STM32 Pin        |
-|-------------|-----------|------------------|
-| GPIO17 / A0 (TX) | →         | PA3 (USART2 RX)  |
-| GND         | shared    | GND              |
+| ESP32 Pin        | Direction | STM32 Pin       |
+|------------------|-----------|-----------------|
+| GPIO17 / A0 (TX) | →         | PA3 (USART2 RX) |
+| GND              | shared    | GND             |
 
 - GPIO18 (RX) wired to PA2 (USART2 TX) but unused in Phase 4
 - Boot output confirms MAC address, ESP-NOW ready, 5s diagnostic loop
@@ -331,12 +313,12 @@ DFU mode. Then immediately run the PlatformIO upload command.
 
 ### Planned Hardware
 
-| Component | Part | Notes |
-|-----------|------|-------|
-| Gimbals   | FrSky M7 Hall Sensor (×2) | Analog output, 4 axes, 0–3.3V |
-| OLED      | HiLetgo 2.42" SSD1309 128×64 SPI | Arriving — use SPI 7-pin variant |
-| Arm switch | 2-position ON-ON toggle | INPUT_PULLUP, LOW = armed |
-| Mode switch | 2-position ON-ON toggle | INPUT_PULLUP, LOW = acro |
+| Component   | Part                                   | Notes                              |
+|-------------|----------------------------------------|------------------------------------|
+| Gimbals     | FrSky M7 Hall Sensor (×2)             | Analog output, 4 axes, 0–3.3V     |
+| OLED        | HiLetgo 2.42" SSD1309 128×64 SPI     | Arriving — use SPI 7-pin variant   |
+| Arm switch  | 2-position ON-ON toggle               | INPUT_PULLUP, LOW = armed          |
+| Mode switch | 2-position ON-ON toggle               | INPUT_PULLUP, LOW = acro           |
 
 ### ADC Calibration (TBD after wiring)
 
@@ -403,7 +385,7 @@ direction.
 - **Soft-mount the FC stack.** Motor vibration aliasing into the IMU is the
   primary cause of PID instability in DIY flight controllers. Use silicone
   grommets or O-ring standoffs — never hard-mount.
-- **3.3V logic throughout.** BMI323, QMC5883L, ESP32 UART, and STM32H7 GPIO
+- **3.3V logic throughout.** BMI323, QMC5883P, ESP32 UART, and STM32H7 GPIO
   are all 3.3V compatible. Do not expose any signal line to 5V.
 - **Magnetometer placement:** Mount the GY-271 away from motors, ESCs, and
   power wires — these are sources of magnetic interference that will corrupt
@@ -418,3 +400,7 @@ direction.
   well within BLHeli_S's 250ms keepalive window. The mag DRDY poll (20 × 1ms)
   was the original cause of 60ms loop time when the mag was absent — fixed by
   gating reads behind `mag_ok`.
+- **Loose connections:** Dupont/header pin connections can work loose between
+  sessions without any visible damage. If previously working hardware stops
+  working, reseat all connectors on the affected signal path before
+  troubleshooting firmware or wiring.
