@@ -3,7 +3,6 @@
 #include <WiFi.h>
 #include <esp_now.h>
 
-
 // Serial1 routes to A0 (TX=GPIO17) and A1 (RX=GPIO18) on this board variant
 #define STM32_UART_TX_PIN 17 // GPIO17 = A0
 #define STM32_UART_RX_PIN 18 // GPIO18 = A1
@@ -51,6 +50,7 @@ void setup() {
 
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
+  Serial.printf("[QUAD] MAC: %s\n", WiFi.macAddress().c_str());
   Serial.println("[QUAD] step 3 — WiFi ok");
 
   if (esp_now_init() != ESP_OK) {

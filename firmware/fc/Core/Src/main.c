@@ -21,6 +21,7 @@
 #include "dma.h"
 #include "i2c.h"
 #include "spi.h"
+#include "stm32h723xx.h"
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
@@ -390,8 +391,8 @@ int main(void)
                  RC_IsHealthy() ? "OK" : "LOST");
         UART_Print(msg);
 
-        snprintf(msg, sizeof(msg), "[RC] bytes=%lu CR1=0x%08lX ISR=0x%08lX\r\n",
-                 rc_bytes_received, USART2->CR1, USART2->ISR);
+        snprintf(msg, sizeof(msg), "[RC] bytes=%lu CR1=0x%08lX ISR=0x%08lX NVIC=%lu\r\n",
+                 rc_bytes_received, USART2->CR1, USART2->ISR, (uint32_t)NVIC_GetEnableIRQ(USART2_IRQn));
         UART_Print(msg);
 
         HAL_Delay(IMU_LOOP_INTERVAL_MS);

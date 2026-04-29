@@ -300,7 +300,7 @@ CTRL1 = 0x1D
 ## Nano ESP32 (Quad-side) ✅ Flashed & Running
 
 - **Role:** ESP-NOW receiver → UART bridge to STM32
-- **MAC address: `E4:B0:63:AF:0F:3C`** — required for remote peer config
+- **MAC address: `20:6E:F1:32:70:3C`** — required for remote peer config
 - **UART wiring:**
 
 | ESP32 Pin   | Direction | STM32 Pin        |
@@ -326,7 +326,7 @@ DFU mode. Then immediately run the PlatformIO upload command.
 ## Nano ESP32 (Remote-side) 🟡 Firmware Built — Pending Wiring
 
 - **Role:** Read M7 hall sensor gimbals + switches → transmit FLARE_RC_Packet_t to quad ESP32 via ESP-NOW at 50Hz
-- **Target peer MAC:** `E4:B0:63:AF:0F:3C` (hardcoded in firmware)
+- **Target peer MAC:** `20:6E:F1:32:70:3C` (hardcoded in firmware)
 - **Pin assignments:** TBD — update `firmware/esp32_remote/src/main.cpp` once wired
 
 ### Planned Hardware

@@ -171,13 +171,14 @@ void USART2_IRQHandler(void)
   /* USER CODE BEGIN USART2_IRQn 0 */
   uint32_t isr = USART2->ISR;
 
-  USART2->ICR = USART_ICR_ORECF | USART_ICR_NECF | USART_ICR_PECF | USART_ICR_FECF;
-
   if (isr & USART_ISR_RXNE_RXFNE) {
     rc_rx_byte = (uint8_t)(USART2->RDR & 0xFF);
+    USART2->ICR = USART_ICR_ORECF | USART_ICR_NECF | USART_ICR_PECF | USART_ICR_FECF;
     RC_UART_RxCpltCallback();
     return;
   }
+
+  USART2->ICR = USART_ICR_ORECF | USART_ICR_NECF | USART_ICR_PECF | USART_ICR_FECF;
 
   /* Handle errors via HAL for error callback support */
   HAL_UART_IRQHandler(&huart2);
