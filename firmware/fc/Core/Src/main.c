@@ -21,7 +21,6 @@
 #include "dma.h"
 #include "i2c.h"
 #include "spi.h"
-#include "stm32h723xx.h"
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
@@ -101,6 +100,8 @@ IMU_Fusion_t imu_fusion;
 
 MAG_Cal_t mag_cal;  /* hard-iron offsets — zero until calibrated */
 float mag_heading;  /* degrees [0, 360), updated each loop       */
+
+static FLARE_RC_Packet_t rc_pkt = {0};  /* persists across loop iterations */
 
 /* USER CODE END PV */
 
@@ -266,6 +267,7 @@ int main(void)
   MX_TIM4_Init();
   MX_I2C1_Init();
   MX_USART2_UART_Init();
+  MX_TIM6_Init();
 
   /* USER CODE BEGIN 2 */
 
@@ -333,6 +335,10 @@ int main(void)
     UART_Print(msg);
     UART_Print("[RC] USART2 receiver ready\r\n");
 
+    /* Start TIM6 — 1kHz DSHOT output timer */
+    HAL_TIM_Base_Start_IT(&htim6);
+    UART_Print("[DSHOT] 1kHz timer started\r\n");
+
     UART_Print("[IMU] starting 100Hz loop\r\n");
 
   /* USER CODE END 2 */
@@ -363,7 +369,6 @@ int main(void)
         float gz_dps = imu_gyr_z / 16.384f;
 
         /* ── RC packet consumption ──────────────────────────────────────── */
-        FLARE_RC_Packet_t rc_pkt = {0};
         if (RC_GetPacket(&rc_pkt)) {
             snprintf(msg, sizeof(msg),
                      "[RC] arm=%u thr=%u rol=%u pit=%u yaw=%u mode=%u\r\n",
@@ -375,14 +380,6 @@ int main(void)
         }
 
         if (RC_IsHealthy() && rc_pkt.armed == FLARE_ARMED && rc_pkt.mode != FLARE_MODE_SAFE) {
-            /*
-             * Map RC channels [1000, 2000] to physical setpoints.
-             * Centre stick = 1500 = zero setpoint.
-             * Roll/pitch:  ±500 counts → ±30 degrees
-             * Yaw rate:    ±500 counts → ±200 dps
-             *
-             * Throttle passed raw — FLARE_Update clamps to DSHOT range [48, 2047].
-             */
             FLARE_SetRollSP   (((float)rc_pkt.roll    - 1500.0f) * (30.0f  / 500.0f));
             FLARE_SetPitchSP  (((float)rc_pkt.pitch   - 1500.0f) * (30.0f  / 500.0f));
             FLARE_SetYawRateSP(((float)rc_pkt.yaw     - 1500.0f) * (200.0f / 500.0f));
@@ -392,10 +389,8 @@ int main(void)
             FLARE_Update(imu_fusion.roll, imu_fusion.pitch,
                          gx_dps, gy_dps, gz_dps, 0.01f);
         } else {
-            /* Disarmed or RC lost — zero everything and send disarm frames */
             FLARE_SetArmed(0);
             FLARE_SetThrottle(0);
-            DSHOT_SendThrottle(0, 0, 0, 0);
         }
 
         snprintf(msg, sizeof(msg),
@@ -478,7 +473,7 @@ void MPU_Config(void)
     MPU_Region_InitTypeDef MPU_InitStruct = {0};
     HAL_MPU_Disable();
 
-    /* Region 1: AXI SRAM (0x24000000, 512KB) — write-through, DMA accessible */
+    /* Region 0: AXI SRAM (0x24000000, 512KB) — write-through, DMA accessible */
     MPU_InitStruct.Enable             = MPU_REGION_ENABLE;
     MPU_InitStruct.Number             = MPU_REGION_NUMBER0;
     MPU_InitStruct.BaseAddress        = 0x24000000;

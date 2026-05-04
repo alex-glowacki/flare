@@ -27,6 +27,8 @@
 #include "usart.h"
 #include "rc.h"
 #include "tim.h"
+#include "dshot.h"
+#include "flare.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -61,6 +63,7 @@
 
 /* External variables --------------------------------------------------------*/
 extern DMA_HandleTypeDef hdma_tim4_up;
+extern TIM_HandleTypeDef htim6;
 /* USER CODE BEGIN EV */
 
 /* USER CODE END EV */
@@ -153,17 +156,33 @@ void DMA1_Stream0_IRQHandler(void)
   /* USER CODE BEGIN DMA1_Stream0_IRQn 0 */
   if (DMA1->LISR & DMA_LISR_TCIF0) {
     DMA1->LIFCR = DMA_LIFCR_CTCIF0;
+    DMA1_Stream0->CR &= ~DMA_SxCR_EN;
     TIM4->DIER &= ~TIM_DIER_UDE;
     TIM4->CCR1 = DSHOT_CCR_IDLE;
     TIM4->CCR2 = DSHOT_CCR_IDLE;
     TIM4->CCR3 = DSHOT_CCR_IDLE;
     TIM4->CCR4 = DSHOT_CCR_IDLE;
+    dshot_dma_busy = 0;
     return;
   }
   /* USER CODE END DMA1_Stream0_IRQn 0 */
   HAL_DMA_IRQHandler(&hdma_tim4_up);
   /* USER CODE BEGIN DMA1_Stream0_IRQn 1 */
   /* USER CODE END DMA1_Stream0_IRQn 1 */
+}
+
+void TIM6_DAC_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM6_DAC_IRQn 0 */
+  if (__HAL_TIM_GET_FLAG(&htim6, TIM_FLAG_UPDATE)) {
+    __HAL_TIM_CLEAR_FLAG(&htim6, TIM_FLAG_UPDATE);
+    DSHOT_SendThrottle(dshot_m1, dshot_m2, dshot_m3, dshot_m4);
+    return;
+  }
+  /* USER CODE END TIM6_DAC_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim6);
+  /* USER CODE BEGIN TIM6_DAC_IRQn 1 */
+  /* USER CODE END TIM6_DAC_IRQn 1 */
 }
 
 void USART2_IRQHandler(void)
@@ -180,7 +199,6 @@ void USART2_IRQHandler(void)
 
   USART2->ICR = USART_ICR_ORECF | USART_ICR_NECF | USART_ICR_PECF | USART_ICR_FECF;
 
-  /* Handle errors via HAL for error callback support */
   HAL_UART_IRQHandler(&huart2);
   /* USER CODE END USART2_IRQn 0 */
 }

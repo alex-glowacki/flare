@@ -47,6 +47,10 @@
 static uint32_t (*const dshot_buf)[DSHOT_NUM_MOTORS] =
     (uint32_t (*)[DSHOT_NUM_MOTORS])DSHOT_BUF_ADDR;
 
+/* Set in DSHOT_StartDMA, cleared in DMA1_Stream0_IRQHandler TC handler.
+ * Prevents re-entrant DMA starts when TIM6 ISR fires during an active transfer. */
+volatile uint8_t dshot_dma_busy = 0;
+
 /* ── Internal helpers ───────────────────────────────────────────────────── */
 
 static uint16_t DSHOT_BuildFrame(uint16_t throttle) {
@@ -71,8 +75,9 @@ static void DSHOT_SerialiseFrame(uint16_t frame, uint8_t motor) {
 static void DSHOT_StartDMA(void) {
     DMA_Stream_TypeDef *dma = DMA1_Stream0;
 
-    /* Wait for previous transfer to complete (TC handler disables the stream) */
-    while (dma->CR & DMA_SxCR_EN) {}
+    /* Skip if a transfer is already in progress — no busy-wait in ISR context */
+    if (dshot_dma_busy) return;
+    dshot_dma_busy = 1;
 
     /* Clear all interrupt flags for Stream0 */
     DMA1->LIFCR = DMA_LIFCR_CTCIF0 | DMA_LIFCR_CHTIF0 |
@@ -95,6 +100,8 @@ static void DSHOT_StartDMA(void) {
 void DSHOT_Init(void) {
     memset((void *)DSHOT_BUF_ADDR, 0, DSHOT_BUF_SIZE);
     SCB_CleanDCache_by_Addr((uint32_t *)DSHOT_BUF_ADDR, DSHOT_BUF_SIZE);
+
+    dshot_dma_busy = 0;
 
     /* Configure DMA1_Stream0: Memory→Peripheral, word width,
      * memory increment, normal mode, high priority, TC interrupt enabled */
@@ -129,6 +136,10 @@ void DSHOT_Init(void) {
     TIM4->CCR2 = DSHOT_CCR_IDLE;
     TIM4->CCR3 = DSHOT_CCR_IDLE;
     TIM4->CCR4 = DSHOT_CCR_IDLE;
+
+    /* TIM6 must be lower priority than DMA1_Stream0 so the DMA TC IRQ
+     * can preempt the TIM6 ISR during any blocking operations */
+    HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 1, 0);
 }
 
 void DSHOT_SendThrottle(uint16_t m1, uint16_t m2, uint16_t m3, uint16_t m4) {

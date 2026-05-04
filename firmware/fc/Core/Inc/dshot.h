@@ -17,6 +17,10 @@
 
 #include <stdint.h>
 
+/* Set by DSHOT_StartDMA, cleared by DMA1_Stream0_IRQHandler TC handler.
+ * Prevents re-entrant DMA starts from the TIM6 1kHz ISR. */
+extern volatile uint8_t dshot_dma_busy;
+
 /* ── Public API ─────────────────────────────────────────────────────────── */
 
 /**
