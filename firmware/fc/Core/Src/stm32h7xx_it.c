@@ -22,6 +22,7 @@
 #include "stm32h7xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include "usart.h"
@@ -48,7 +49,8 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN PV */
-
+volatile uint32_t tim6_isr_count = 0;
+extern volatile uint8_t dshot_dma_busy;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -176,6 +178,7 @@ void TIM6_DAC_IRQHandler(void)
   /* USER CODE BEGIN TIM6_DAC_IRQn 0 */
   if (__HAL_TIM_GET_FLAG(&htim6, TIM_FLAG_UPDATE)) {
     __HAL_TIM_CLEAR_FLAG(&htim6, TIM_FLAG_UPDATE);
+    tim6_isr_count++;
     DSHOT_SendThrottle(dshot_m1, dshot_m2, dshot_m3, dshot_m4);
     return;
   }

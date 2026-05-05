@@ -174,7 +174,9 @@ void HAL_TIM_Base_MspInit(TIM_HandleTypeDef* tim_baseHandle)
     HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(TIM6_DAC_IRQn);
   /* USER CODE BEGIN TIM6_MspInit 1 */
-
+    /* Lower TIM6 priority below DMA1_Stream0 (prio 0) so the DMA TC interrupt
+     * can preempt TIM6 ISR and clear dshot_dma_busy flag immediately */
+    HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 1, 0);
   /* USER CODE END TIM6_MspInit 1 */
   }
 }

@@ -56,6 +56,18 @@ void FLARE_Update(float roll, float pitch, float gx, float gy, float gz, float d
         return;
     }
 
+    /* Don't apply PID corrections below a minimum flying throttle */
+    if (state.throttle < 200) {
+        dshot_m1 = state.throttle;
+        dshot_m2 = state.throttle;
+        dshot_m3 = state.throttle;
+        dshot_m4 = state.throttle;
+        PID_Reset(&pid_roll);
+        PID_Reset(&pid_pitch);
+        PID_Reset(&pid_yaw);
+        return;
+    }
+
     float out_roll  = PID_Update(&pid_roll,  state.roll_sp,     roll,  gx, dt);
     float out_pitch = PID_Update(&pid_pitch, state.pitch_sp,    pitch, gy, dt);
     float out_yaw   = PID_Update(&pid_yaw,   state.yaw_rate_sp, 0.0f,  gz, dt);

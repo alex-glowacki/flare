@@ -29,7 +29,9 @@
 
 #include "dshot.h"
 #include "main.h"
+#include "stm32h7xx_it.h"
 #include "tim.h"
+#include <stdint.h>
 #include <string.h>
 
 /* ── Timing constants ───────────────────────────────────────────────────── */
@@ -122,6 +124,11 @@ void DSHOT_Init(void) {
     HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
 
+    /* CRITICAL: Start TIM4 counter before enabling PWM channels.
+     * On STM32H7, HAL_TIM_PWM_Start only enables the output compare,
+     * it does NOT start the counter if the timer wasn't already running. */
+    __HAL_TIM_ENABLE(&htim4);
+
     HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
     HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_2);
     HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
@@ -136,10 +143,6 @@ void DSHOT_Init(void) {
     TIM4->CCR2 = DSHOT_CCR_IDLE;
     TIM4->CCR3 = DSHOT_CCR_IDLE;
     TIM4->CCR4 = DSHOT_CCR_IDLE;
-
-    /* TIM6 must be lower priority than DMA1_Stream0 so the DMA TC IRQ
-     * can preempt the TIM6 ISR during any blocking operations */
-    HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 1, 0);
 }
 
 void DSHOT_SendThrottle(uint16_t m1, uint16_t m2, uint16_t m3, uint16_t m4) {

@@ -58,7 +58,7 @@ void SysTick_Handler(void);
 void DMA1_Stream0_IRQHandler(void);
 void TIM6_DAC_IRQHandler(void);
 /* USER CODE BEGIN EFP */
-
+extern volatile uint32_t tim6_isr_count;
 /* USER CODE END EFP */
 
 #ifdef __cplusplus
