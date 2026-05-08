@@ -235,7 +235,7 @@ static void read_and_send() {
     pkt.roll = map_stick(analogRead(PIN_ROLL), kRoll);
 
     pkt.armed =
-        (digitalRead(PIN_ARM_SWITCH) == HIGH) ? FLARE_ARMED : FLARE_DISARMED;
+        (digitalRead(PIN_ARM_SWITCH) == LOW) ? FLARE_ARMED : FLARE_DISARMED;
     pkt.mode = read_mode();
 
     pkt.reserved[0] = 0;

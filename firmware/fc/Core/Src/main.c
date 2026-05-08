@@ -34,6 +34,7 @@
 #include "imu_fusion.h"
 #include "mag.h"
 #include "rc.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 /* USER CODE END Includes */
@@ -384,18 +385,17 @@ int main(void)
             FLARE_SetRollSP   (((float)rc_pkt.roll    - 1500.0f) * (30.0f  / 500.0f));
             FLARE_SetPitchSP  (((float)rc_pkt.pitch   - 1500.0f) * (30.0f  / 500.0f));
             FLARE_SetYawRateSP(((float)rc_pkt.yaw     - 1500.0f) * (200.0f / 500.0f));
-            /* Map RC throttle 1000-2000 to DSHOT 48-2047 */
+
             uint16_t dshot_thr = (uint16_t)(((float)(rc_pkt.throttle - 1000) / 1000.0f) * (2047.0f - 48.0f) + 48.0f);
+
             FLARE_SetThrottle(dshot_thr);
-            /* Temp debug to show DSHOT value */
+            FLARE_SetArmed(1);
+            FLARE_Update(imu_fusion.roll, imu_fusion.pitch,
+                         gx_dps, gy_dps, gz_dps, 0.01f);
+
             snprintf(msg, sizeof(msg), "[THR] rc=%u dshot=%u m1=%u m2=%u m3=%u m4=%u\r\n",
                      rc_pkt.throttle, dshot_thr, dshot_m1, dshot_m2, dshot_m3, dshot_m4);
             UART_Print(msg);
-            /* End temp debug */
-            FLARE_SetArmed(1);
-
-            FLARE_Update(imu_fusion.roll, imu_fusion.pitch,
-                         gx_dps, gy_dps, gz_dps, 0.01f);
         } else {
             FLARE_SetArmed(0);
             FLARE_SetThrottle(0);
@@ -408,11 +408,6 @@ int main(void)
                  imu_gyr_x, imu_gyr_y, imu_gyr_z,
                  imu_fusion.roll, imu_fusion.pitch, imu_fusion.yaw,
                  RC_IsHealthy() ? "OK" : "LOST");
-        UART_Print(msg);
-
-        snprintf(msg, sizeof(msg), "[RC] bytes=%lu CR1=0x%08lX ISR=0x%08lX NVIC=%lu TIM6=%lu\r\n",
-                 rc_bytes_received, USART2->CR1, USART2->ISR, (uint32_t)NVIC_GetEnableIRQ(USART2_IRQn), 
-                 tim6_isr_count);
         UART_Print(msg);
 
         HAL_Delay(IMU_LOOP_INTERVAL_MS);

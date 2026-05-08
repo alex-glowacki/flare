@@ -56,8 +56,7 @@ void FLARE_Update(float roll, float pitch, float gx, float gy, float gz, float d
         return;
     }
 
-    /* Don't apply PID corrections below a minimum flying throttle */
-    if (state.throttle < 200) {
+    if (state.throttle < 250) {
         dshot_m1 = state.throttle;
         dshot_m2 = state.throttle;
         dshot_m3 = state.throttle;
