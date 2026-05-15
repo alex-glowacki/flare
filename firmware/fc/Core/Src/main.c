@@ -85,6 +85,9 @@
 
 /* USER CODE BEGIN PV */
 
+extern volatile uint32_t dshot_send_count;
+extern volatile uint32_t dshot_tc_count;
+
 volatile uint16_t who_am_i_result   = 0;
 volatile uint16_t acc_conf_readback = 0;
 volatile uint16_t gyr_conf_readback = 0;
@@ -273,15 +276,43 @@ int main(void)
 
   /* USER CODE BEGIN 2 */
 
+    /* msg declared early so it is available throughout entire init sequence */
+    char msg[128];
+    uint32_t loop_count = 0;
+
     HAL_Delay(10);   /* allow USART2 to fully settle before arming IT */
 
+    /*
+     * DSHOT init and TIM6 MUST both start before the arming loop.
+     * Bluejay auto-detects protocol during the first frames it receives.
+     * TIM6 drives the 1kHz DSHOT ISR — without it running, frames during
+     * the arming loop are sent ad-hoc from the main loop at inconsistent
+     * timing, which can cause Bluejay to misidentify the protocol or fail
+     * to arm. Starting TIM6 immediately after DSHOT_Init() ensures Bluejay
+     * sees clean, consistent 1kHz DSHOT300 frames from frame zero.
+     */
     DSHOT_Init();
     UART_Print("[DSHOT] driver ready\r\n");
 
-    for (int i = 0; i < 200; i++) {
-        DSHOT_SendThrottle(0, 0, 0, 0);
+    HAL_TIM_Base_Start_IT(&htim6);
+    UART_Print("[DSHOT] 1kHz timer started\r\n");
+
+    snprintf(msg, sizeof(msg), "[DSHOT] arming loop start t=%lums\r\n",
+             HAL_GetTick());
+    UART_Print(msg);
+
+    /*
+     * Arming loop: 800 × 10ms = 8s of DSHOT 0 frames.
+     * TIM6 ISR sends the actual frames at 1kHz — HAL_Delay here just
+     * keeps the loop alive for the required duration.
+     */
+    for (int i = 0; i < 800; i++) {
         HAL_Delay(10);
     }
+
+    snprintf(msg, sizeof(msg), "[DSHOT] arming loop done  t=%lums\r\n",
+             HAL_GetTick());
+    UART_Print(msg);
     UART_Print("[DSHOT] ESCs armed\r\n");
 
     UART_Print("[FLARE] boot ok\r\n");
@@ -294,8 +325,6 @@ int main(void)
         UART_Print("[IMU] INIT FAILED -- feature engine timeout\r\n");
         Error_Handler();
     }
-
-    char msg[128];
 
     snprintf(msg, sizeof(msg), "[IMU] WHO_AM_I    = 0x%02X (expect 0x43)\r\n",
              who_am_i_result & 0x00FF);
@@ -337,9 +366,32 @@ int main(void)
     UART_Print(msg);
     UART_Print("[RC] USART2 receiver ready\r\n");
 
-    /* Start TIM6 — 1kHz DSHOT output timer */
-    HAL_TIM_Base_Start_IT(&htim6);
-    UART_Print("[DSHOT] 1kHz timer started\r\n");
+    /* ── IMU level calibration ───────────────────────────────────────────── */
+    /* 200 samples × 10ms = 2s. Filter converges in ~150 samples; average    */
+    /* the last 50 as the ground-level offset applied every loop thereafter.  */
+    UART_Print("[CAL] Hold still — levelling IMU (2s)...\r\n");
+    float imu_roll_offset  = 0.0f;
+    float imu_pitch_offset = 0.0f;
+    float cal_roll_sum  = 0.0f;
+    float cal_pitch_sum = 0.0f;
+    for (int cal_i = 0; cal_i < 200; cal_i++) {
+        BMI323_ReadAccel();
+        BMI323_ReadGyro();
+        IMU_Fusion_Update(&imu_fusion,
+                          imu_acc_x, imu_acc_y, imu_acc_z,
+                          imu_gyr_x, imu_gyr_y, imu_gyr_z,
+                          0.0f, 0.01f, 0.96f, 0.90f);
+        if (cal_i >= 150) {
+            cal_roll_sum  += imu_fusion.roll;
+            cal_pitch_sum += imu_fusion.pitch;
+        }
+        HAL_Delay(10);
+    }
+    imu_roll_offset  = cal_roll_sum  / 50.0f;
+    imu_pitch_offset = cal_pitch_sum / 50.0f;
+    snprintf(msg, sizeof(msg), "[CAL] level offset: roll=%.2f  pitch=%.2f\r\n",
+             imu_roll_offset, imu_pitch_offset);
+    UART_Print(msg);
 
     UART_Print("[IMU] starting 100Hz loop\r\n");
 
@@ -370,35 +422,57 @@ int main(void)
         float gy_dps = imu_gyr_y / 16.384f;
         float gz_dps = imu_gyr_z / 16.384f;
 
+        float roll_corr  = imu_fusion.roll  - imu_roll_offset;
+        float pitch_corr = imu_fusion.pitch - imu_pitch_offset;
+
         /* ── RC packet consumption ──────────────────────────────────────── */
         if (RC_GetPacket(&rc_pkt)) {
             snprintf(msg, sizeof(msg),
-                     "[RC] arm=%u thr=%u rol=%u pit=%u yaw=%u mode=%u\r\n",
+                     "[RC] arm=%u thr=%u rol=%u pit=%u yaw=%u mode=%u crc_fail=%lu\r\n",
                      rc_pkt.armed,
                      rc_pkt.throttle, rc_pkt.roll,
                      rc_pkt.pitch,    rc_pkt.yaw,
-                     rc_pkt.mode);
+                     rc_pkt.mode,
+                     rc_crc_failures);
             UART_Print(msg);
         }
 
-        if (RC_IsHealthy() && rc_pkt.armed == FLARE_ARMED && rc_pkt.mode != FLARE_MODE_SAFE) {
+        if (RC_IsHealthy() && rc_pkt.mode != FLARE_MODE_SAFE) {
+            motors_enabled = 1;
+
             FLARE_SetRollSP   (((float)rc_pkt.roll    - 1500.0f) * (30.0f  / 500.0f));
             FLARE_SetPitchSP  (((float)rc_pkt.pitch   - 1500.0f) * (30.0f  / 500.0f));
             FLARE_SetYawRateSP(((float)rc_pkt.yaw     - 1500.0f) * (200.0f / 500.0f));
 
-            uint16_t dshot_thr = (uint16_t)(((float)(rc_pkt.throttle - 1000) / 1000.0f) * (2047.0f - 48.0f) + 48.0f);
+            /* Map RC throttle [1000, 2000] → DSHOT [48, 2047] */
+            uint16_t dshot_thr = (uint16_t)(
+                ((float)(rc_pkt.throttle - 1000) / 1000.0f)
+                * (2047.0f - 48.0f) + 48.0f);
+
+            /* DSHOT values 1–47 are reserved special commands; 48 is min throttle */
+            if (dshot_thr < 48) dshot_thr = 48;
 
             FLARE_SetThrottle(dshot_thr);
             FLARE_SetArmed(1);
-            FLARE_Update(imu_fusion.roll, imu_fusion.pitch,
+            FLARE_Update(roll_corr, pitch_corr,
                          gx_dps, gy_dps, gz_dps, 0.01f);
 
-            snprintf(msg, sizeof(msg), "[THR] rc=%u dshot=%u m1=%u m2=%u m3=%u m4=%u\r\n",
-                     rc_pkt.throttle, dshot_thr, dshot_m1, dshot_m2, dshot_m3, dshot_m4);
+            snprintf(msg, sizeof(msg),
+                     "[THR] rc=%u dshot=%u m1=%u m2=%u m3=%u m4=%u\r\n",
+                     rc_pkt.throttle, dshot_thr,
+                     dshot_m1, dshot_m2, dshot_m3, dshot_m4);
             UART_Print(msg);
         } else {
+            motors_enabled = 0;
             FLARE_SetArmed(0);
             FLARE_SetThrottle(0);
+            FLARE_Update(roll_corr, pitch_corr,
+                         gx_dps, gy_dps, gz_dps, 0.0f);
+
+            snprintf(msg, sizeof(msg),
+                     "[SAFE] m1=%u m2=%u m3=%u m4=%u\r\n",
+                     dshot_m1, dshot_m2, dshot_m3, dshot_m4);
+            UART_Print(msg);
         }
 
         snprintf(msg, sizeof(msg),
@@ -406,9 +480,16 @@ int main(void)
                  "  R:%7.2f  P:%7.2f  Y:%7.2f  RC:%s\r\n",
                  imu_acc_x, imu_acc_y, imu_acc_z,
                  imu_gyr_x, imu_gyr_y, imu_gyr_z,
-                 imu_fusion.roll, imu_fusion.pitch, imu_fusion.yaw,
+                 roll_corr, pitch_corr, imu_fusion.yaw,
                  RC_IsHealthy() ? "OK" : "LOST");
         UART_Print(msg);
+
+        if (++loop_count % 100 == 0) {
+            snprintf(msg, sizeof(msg),
+                     "[DIAG] send=%lu tc=%lu\r\n",
+                     dshot_send_count, dshot_tc_count);
+            UART_Print(msg);
+        }
 
         HAL_Delay(IMU_LOOP_INTERVAL_MS);
 
@@ -477,7 +558,15 @@ void MPU_Config(void)
     MPU_Region_InitTypeDef MPU_InitStruct = {0};
     HAL_MPU_Disable();
 
-    /* Region 0: AXI SRAM (0x24000000, 512KB) — write-through, DMA accessible */
+    /*
+     * Region 0: DSHOT DMA buffer in AXI SRAM (0x24000000, 512KB)
+     *
+     * Non-cacheable so CPU writes are immediately visible to DMA
+     * without requiring explicit cache flush operations.
+     *
+     * TEX=1, C=0, B=0 = Normal memory, Non-cacheable.
+     * This is the correct policy for any buffer shared between CPU and DMA.
+     */
     MPU_InitStruct.Enable             = MPU_REGION_ENABLE;
     MPU_InitStruct.Number             = MPU_REGION_NUMBER0;
     MPU_InitStruct.BaseAddress        = 0x24000000;
@@ -487,8 +576,8 @@ void MPU_Config(void)
     MPU_InitStruct.AccessPermission   = MPU_REGION_FULL_ACCESS;
     MPU_InitStruct.DisableExec        = MPU_INSTRUCTION_ACCESS_DISABLE;
     MPU_InitStruct.IsShareable        = MPU_ACCESS_NOT_SHAREABLE;
-    MPU_InitStruct.IsCacheable        = MPU_ACCESS_CACHEABLE;
-    MPU_InitStruct.IsBufferable       = MPU_ACCESS_BUFFERABLE;
+    MPU_InitStruct.IsCacheable        = MPU_ACCESS_NOT_CACHEABLE;
+    MPU_InitStruct.IsBufferable       = MPU_ACCESS_NOT_BUFFERABLE;
     HAL_MPU_ConfigRegion(&MPU_InitStruct);
 
     HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
