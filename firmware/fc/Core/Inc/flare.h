@@ -18,6 +18,8 @@ extern volatile uint16_t dshot_m2;
 extern volatile uint16_t dshot_m3;
 extern volatile uint16_t dshot_m4;
 
+extern volatile uint8_t motors_enabled;
+
 void FLARE_Init(void);
 void FLARE_Update(float roll, float pitch, float gx, float gy, float gz, float dt);
 void FLARE_SetArmed(uint8_t armed);

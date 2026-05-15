@@ -39,7 +39,6 @@ static const uint8_t kQuadMac[6] = {0xD4, 0xE9, 0xF4, 0xE8, 0x10, 0x74};
 #define PIN_ROLL A2      // right gimbal Y-axis (was A3 pre-rotation)
 
 // Digital switches (INPUT_PULLUP — LOW = active)
-#define PIN_ARM_SWITCH D12    // arming toggle switch — ON = armed
 #define PIN_MODE_SWITCH_A D3  // mode switch terminal 1 (UP)   — LOW = ANGLE
 #define PIN_MODE_SWITCH_B D4  // mode switch terminal 3 (DOWN) — LOW = ACRO
 //
@@ -90,11 +89,11 @@ struct AxisCal {
 };
 
 // min, center, max, deadband, reversed
-static const AxisCal kThrottle = {265, 0, 3869, 0,
+static const AxisCal kThrottle = {326, 0, 3869, 0,
                                   false};  // A1 - no center/deadband
-static const AxisCal kYaw = {253, 1756, 3418, 40, false};   // A0
-static const AxisCal kPitch = {38, 1622, 3129, 40, false};  // A3
-static const AxisCal kRoll = {251, 1799, 3647, 40, false};  // A2
+static const AxisCal kYaw = {253, 1949, 3418, 60, false};   // A0
+static const AxisCal kPitch = {38, 1803, 3129, 40, false};  // A3
+static const AxisCal kRoll = {251, 1623, 3647, 40, false};  // A2
 
 // ---------------------------------------------------------------------------
 // Diagnostics
@@ -234,9 +233,8 @@ static void read_and_send() {
     pkt.pitch = map_stick(analogRead(PIN_PITCH), kPitch);
     pkt.roll = map_stick(analogRead(PIN_ROLL), kRoll);
 
-    pkt.armed =
-        (digitalRead(PIN_ARM_SWITCH) == LOW) ? FLARE_ARMED : FLARE_DISARMED;
     pkt.mode = read_mode();
+    pkt.armed = (pkt.mode != FLARE_MODE_SAFE) ? FLARE_ARMED : FLARE_DISARMED;
 
     pkt.reserved[0] = 0;
     pkt.reserved[1] = 0;
@@ -264,7 +262,6 @@ void setup() {
     u8g2.sendBuffer();
 
     // Switch pins
-    pinMode(PIN_ARM_SWITCH, INPUT_PULLUP);
     pinMode(PIN_MODE_SWITCH_A, INPUT_PULLUP);
     pinMode(PIN_MODE_SWITCH_B, INPUT_PULLUP);
 

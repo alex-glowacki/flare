@@ -39,6 +39,8 @@ extern volatile uint8_t rc_init_status;
 extern volatile uint32_t rc_rearm_failures;
 extern volatile uint32_t rc_error_callbacks;
 
+extern volatile uint32_t rc_crc_failures;
+
 /* ---------------------------------------------------------------------------
  * RC_Init()
  * --------------------------------------------------------------------------- */

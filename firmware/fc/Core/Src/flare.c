@@ -15,6 +15,8 @@ volatile uint16_t dshot_m2 = 0;
 volatile uint16_t dshot_m3 = 0;
 volatile uint16_t dshot_m4 = 0;
 
+volatile uint8_t motors_enabled = 0;
+
 /* Clamp a float to [min, max] */
 static float clamp(float v, float min, float max) {
     if (v < min) return min;
@@ -46,6 +48,8 @@ void FLARE_Init(void) {
 
 void FLARE_Update(float roll, float pitch, float gx, float gy, float gz, float dt) {
     if (!state.armed || state.throttle < 48) {
+        /* DSHOT 0 = disarm command. Values 1-47 are reserved special commands
+         * and must never be sent to ESCs. */
         dshot_m1 = 0;
         dshot_m2 = 0;
         dshot_m3 = 0;
@@ -80,7 +84,7 @@ void FLARE_Update(float roll, float pitch, float gx, float gy, float gz, float d
      *  M4 (Rear-Left,   CW)  = throttle + roll + pitch + yaw
      *
      * DSHOT value range: 48 (min throttle) to 2047 (max throttle).
-     * Values below 48 are disarm commands — clamp to 48 minimum when armed.
+     * Values below 48 are disarm/special commands — clamp to 48 minimum when armed.
      */
     float t = (float)state.throttle;
 
@@ -100,6 +104,8 @@ void FLARE_Update(float roll, float pitch, float gx, float gy, float gz, float d
 void FLARE_SetArmed(uint8_t armed) {
     state.armed = armed;
     if (!armed) {
+        /* DSHOT 0 = disarm command. Must not send 48 (min throttle) when
+         * unarmed — ESC behaviour on reserved values 1-47 is undefined. */
         dshot_m1 = 0;
         dshot_m2 = 0;
         dshot_m3 = 0;

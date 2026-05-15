@@ -24,6 +24,8 @@ volatile uint8_t  rc_init_status     = 0xFF;
 volatile uint32_t rc_rearm_failures  = 0;
 volatile uint32_t rc_error_callbacks = 0;
 
+volatile uint32_t rc_crc_failures = 0;
+
 /* ---------------------------------------------------------------------------
  * rearm_usart2_rx
  * Arms USART2 RX interrupt directly without going through HAL_UART_Receive_IT,
@@ -44,6 +46,7 @@ void RC_Init(void)
     rc_init_status     = 0xFF;
     rc_rearm_failures  = 0;
     rc_error_callbacks = 0;
+    rc_crc_failures = 0;
     memset(&rc_packet, 0, sizeof(rc_packet));
 
     __HAL_UNLOCK(&huart2);
@@ -80,6 +83,7 @@ void RC_UART_RxCpltCallback(void)
         }
 
         if (pkt->checksum != flare_checksum(pkt)) {
+            rc_crc_failures++;
             rearm_usart2_rx();
             return;
         }

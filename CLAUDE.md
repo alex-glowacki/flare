@@ -59,7 +59,7 @@ C:\Users\alexg\.platformio\penv\Scripts\platformio.exe device monitor --baud 115
 
 - **Throttle mapping (`main.c`):** RC channel (1000–2000) maps to DSHOT (48–2047): `dshot = ((rc - 1000) / 1000.0) * (2047 - 48) + 48`. The floor is 48, not 0 — DSHOT values 1–47 are reserved BLHeli_S special commands.
 - **PID spool-up threshold (`flare.c`):** `FLARE_Update()` sends equal throttle to all motors (no PID) when `state.throttle < 250`. This is ~10% above the DSHOT minimum, giving ESCs time to spool before stabilisation engages.
-- **Arm switch logic (`esp32_remote`):** `PIN_ARM_SWITCH` (D12) is `INPUT_PULLUP` — `LOW = armed`, `HIGH = disarmed`. Always arm with throttle stick at physical minimum (display ~0%) to avoid spin-up jolt.
+- **Arming (`esp32_remote`):** No dedicated arm switch. Arming is derived from the mode switch: ANGLE or ACRO → `FLARE_ARMED`; center (SAFE) → `FLARE_DISARMED`. D12 (`PIN_ARM_SWITCH`) is unused. Always arm with throttle stick at physical minimum (display ~0%) to avoid spin-up jolt.
 - **Magnetometer interference:** Running motors corrupt the QMC5883P heading via EMI. Yaw fusion drifts when motors spin without calibrated hard-iron offsets. Do not rely on yaw during bench motor tests.
 
 ## Hardware Quirks
