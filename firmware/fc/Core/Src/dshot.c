@@ -19,12 +19,20 @@
  * which the timer routes to CCR1→CCR2→CCR3→CCR4 automatically.
  * After 17 update events (68 words total), DMA stops (Normal mode).
  * The 17th row is the reset slot (all zeros), ensuring ESC latches the frame.
- * On DMA transfer complete, CCR1–CCR4 are set to ARR+1 (640) to hold
- * the output idle-high between frames.
+ * On DMA transfer complete, CCR1–CCR4 are set to 0 to hold
+ * the output idle-low between frames.
  *
  * Buffer layout: dshot_buf[row][motor], 17 rows × 4 motors = 68 words.
  * Buffer placed in D1 AXI SRAM (0x24000000) for DMA access.
- * D-cache flushed after each buffer write.
+ *
+ * Cache policy: AXI SRAM MPU region is configured as Non-cacheable
+ * (TEX=1, C=0, B=0). CPU writes go directly to SRAM — no cache flush
+ * needed before DMA transfers.
+ *
+ * STM32H7 DMA stream re-arm: after clearing DMA_SxCR_EN, hardware
+ * takes several AHB cycles to fully disable. PAR/M0AR/NDTR are locked
+ * until EN reads back 0. DSHOT_StartDMA waits for EN=0 before
+ * reloading registers and re-enabling.
  */
 
 #include "dshot.h"
@@ -40,11 +48,15 @@
 #define DSHOT_FRAME_BITS   16U
 #define DSHOT_BUF_ROWS     17U   /* 16 data bits + 1 reset slot */
 #define DSHOT_NUM_MOTORS   4U
-#define DSHOT_CCR_IDLE     640U  /* ARR+1 → 100% duty → idle-high between frames */
+#define DSHOT_CCR_IDLE     0U    /* CCR=0 → 0% duty → idle-low between frames */
 
 #define DSHOT_BUF_ADDR  0x24000000UL
 #define DSHOT_BUF_SIZE  (DSHOT_BUF_ROWS * DSHOT_NUM_MOTORS * sizeof(uint32_t))
 #define DSHOT_BURST_LEN (DSHOT_BUF_ROWS * DSHOT_NUM_MOTORS)  /* 68 words */
+
+/* Maximum AHB cycles to wait for DMA EN to clear after disabling.
+ * At 192MHz, 64 cycles = ~333ns — well beyond the 2-3 cycle hardware latency. */
+#define DSHOT_DMA_EN_WAIT_CYCLES  64U
 
 static uint32_t (*const dshot_buf)[DSHOT_NUM_MOTORS] =
     (uint32_t (*)[DSHOT_NUM_MOTORS])DSHOT_BUF_ADDR;
@@ -62,7 +74,7 @@ static uint16_t DSHOT_BuildFrame(uint16_t throttle) {
         throttle = 2047;
 
     uint16_t v = (throttle << 1); /* telemetry bit = 0 */
-    uint16_t crc = (~(v ^ (v >> 4) ^ (v >> 8))) & 0x0F;
+    uint16_t crc = (v ^ (v >> 4) ^ (v >> 8)) & 0x0F; /* Bluejay uses non-inverted CRC */
     return (v << 4) | crc;
 }
 
@@ -77,15 +89,23 @@ static void DSHOT_SerialiseFrame(uint16_t frame, uint8_t motor) {
 static void DSHOT_StartDMA(void) {
     DMA_Stream_TypeDef *dma = DMA1_Stream0;
 
-    /* Skip if a transfer is already in progress — no busy-wait in ISR context */
+    /* Skip if a transfer is already in progress */
     if (dshot_dma_busy) return;
     dshot_dma_busy = 1;
+
+    /*
+     * STM32H7: EN must read back as 0 before PAR/M0AR/NDTR can be written
+     * and before re-enabling. Spin until clear with a bounded timeout.
+     * In normal operation this resolves in 2-3 cycles; the loop is a safety net.
+     */
+    uint32_t wait = DSHOT_DMA_EN_WAIT_CYCLES;
+    while ((dma->CR & DMA_SxCR_EN) && wait--) {}
 
     /* Clear all interrupt flags for Stream0 */
     DMA1->LIFCR = DMA_LIFCR_CTCIF0 | DMA_LIFCR_CHTIF0 |
                   DMA_LIFCR_CTEIF0 | DMA_LIFCR_CDMEIF0 | DMA_LIFCR_CFEIF0;
 
-    /* Set source, destination, length */
+    /* Reload source, destination, length — only safe after EN=0 */
     dma->PAR  = (uint32_t)&TIM4->DMAR;
     dma->M0AR = DSHOT_BUF_ADDR;
     dma->NDTR = DSHOT_BURST_LEN;
@@ -101,7 +121,7 @@ static void DSHOT_StartDMA(void) {
 
 void DSHOT_Init(void) {
     memset((void *)DSHOT_BUF_ADDR, 0, DSHOT_BUF_SIZE);
-    SCB_CleanDCache_by_Addr((uint32_t *)DSHOT_BUF_ADDR, DSHOT_BUF_SIZE);
+    /* No cache flush needed — AXI SRAM region is non-cacheable */
 
     dshot_dma_busy = 0;
 
@@ -138,7 +158,7 @@ void DSHOT_Init(void) {
     TIM4->DCR = (3U << TIM_DCR_DBL_Pos)    /* DBL=3 → 4 transfers per burst */
               | (13U << TIM_DCR_DBA_Pos);   /* DBA=13 → CCR1 offset in TIM4 */
 
-    /* Pre-set CCRs idle-high so signal is high before first frame */
+    /* Pre-set CCRs idle-low so signal is low before first frame */
     TIM4->CCR1 = DSHOT_CCR_IDLE;
     TIM4->CCR2 = DSHOT_CCR_IDLE;
     TIM4->CCR3 = DSHOT_CCR_IDLE;
@@ -151,7 +171,7 @@ void DSHOT_SendThrottle(uint16_t m1, uint16_t m2, uint16_t m3, uint16_t m4) {
     DSHOT_SerialiseFrame(DSHOT_BuildFrame(m3), 2);
     DSHOT_SerialiseFrame(DSHOT_BuildFrame(m4), 3);
 
-    SCB_CleanDCache_by_Addr((uint32_t *)DSHOT_BUF_ADDR, DSHOT_BUF_SIZE);
+    /* No cache flush needed — AXI SRAM region is non-cacheable */
 
     DSHOT_StartDMA();
 }

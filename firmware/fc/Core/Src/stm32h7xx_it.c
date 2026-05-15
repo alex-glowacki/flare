@@ -34,40 +34,38 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN TD */
-
 /* USER CODE END TD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define DSHOT_CCR_IDLE  640U
+#define DSHOT_CCR_IDLE  0U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN PV */
-volatile uint32_t tim6_isr_count = 0;
 extern volatile uint8_t dshot_dma_busy;
+extern volatile uint8_t motors_enabled;
+
+volatile uint32_t dshot_send_count = 0;
+volatile uint32_t dshot_tc_count   = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN PFP */
-
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
 extern DMA_HandleTypeDef hdma_tim4_up;
 extern TIM_HandleTypeDef htim6;
 /* USER CODE BEGIN EV */
-
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -156,36 +154,53 @@ void SysTick_Handler(void)
 void DMA1_Stream0_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Stream0_IRQn 0 */
+  /*
+   * Full direct-register DMA management — do NOT fall through to
+   * HAL_DMA_IRQHandler. HAL's DMA state machine is incompatible with
+   * the manual burst setup used by the DSHOT driver. Calling HAL here
+   * would re-enable TIM4 UDE and corrupt subsequent frames.
+   */
   if (DMA1->LISR & DMA_LISR_TCIF0) {
+    /* Clear TC flag */
     DMA1->LIFCR = DMA_LIFCR_CTCIF0;
+
+    /* Disable DMA stream and TIM4 update DMA request */
     DMA1_Stream0->CR &= ~DMA_SxCR_EN;
     TIM4->DIER &= ~TIM_DIER_UDE;
+
+    /* Hold all outputs idle-low between frames */
     TIM4->CCR1 = DSHOT_CCR_IDLE;
     TIM4->CCR2 = DSHOT_CCR_IDLE;
     TIM4->CCR3 = DSHOT_CCR_IDLE;
     TIM4->CCR4 = DSHOT_CCR_IDLE;
+
     dshot_dma_busy = 0;
-    return;
+    dshot_tc_count++;
   }
   /* USER CODE END DMA1_Stream0_IRQn 0 */
-  HAL_DMA_IRQHandler(&hdma_tim4_up);
-  /* USER CODE BEGIN DMA1_Stream0_IRQn 1 */
-  /* USER CODE END DMA1_Stream0_IRQn 1 */
+
+  /* HAL_DMA_IRQHandler intentionally omitted — direct register control only */
 }
 
 void TIM6_DAC_IRQHandler(void)
 {
   /* USER CODE BEGIN TIM6_DAC_IRQn 0 */
-  if (__HAL_TIM_GET_FLAG(&htim6, TIM_FLAG_UPDATE)) {
+  /*
+   * 1kHz DSHOT send tick.
+   * Manually clear the update flag before calling HAL to prevent HAL
+   * from firing a redundant update callback. HAL_TIM_IRQHandler is
+   * still called so HAL's internal tick state stays consistent.
+   */
+  if (__HAL_TIM_GET_FLAG(&htim6, TIM_FLAG_UPDATE) &&
+      __HAL_TIM_GET_IT_SOURCE(&htim6, TIM_IT_UPDATE)) {
     __HAL_TIM_CLEAR_FLAG(&htim6, TIM_FLAG_UPDATE);
-    tim6_isr_count++;
+
     DSHOT_SendThrottle(dshot_m1, dshot_m2, dshot_m3, dshot_m4);
-    return;
+    dshot_send_count++;
   }
   /* USER CODE END TIM6_DAC_IRQn 0 */
-  HAL_TIM_IRQHandler(&htim6);
-  /* USER CODE BEGIN TIM6_DAC_IRQn 1 */
-  /* USER CODE END TIM6_DAC_IRQn 1 */
+
+  /* HAL_TIM_IRQHandler intentionally omitted — flag already cleared above */
 }
 
 void USART2_IRQHandler(void)
@@ -201,11 +216,9 @@ void USART2_IRQHandler(void)
   }
 
   USART2->ICR = USART_ICR_ORECF | USART_ICR_NECF | USART_ICR_PECF | USART_ICR_FECF;
-
   HAL_UART_IRQHandler(&huart2);
   /* USER CODE END USART2_IRQn 0 */
 }
 
 /* USER CODE BEGIN 1 */
-
 /* USER CODE END 1 */
