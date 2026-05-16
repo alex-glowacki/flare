@@ -24,6 +24,8 @@
 | USART1 RX     | PA10           | CP2102 TX (debug)                 |
 | USART2 TX     | PA2            | Unused (available for future use) |
 | USART2 RX     | PA3            | ESP32 quad-side UART TX           |
+| USART3 TX     | PB10           | GPS module RX (optional/unused)   |
+| USART3 RX     | PB11           | GPS module TX                     |
 | User LED      | PG7 (LED_USER) |                                   |
 | TIM4 CH1      | PD12           | DSHOT M1 (Front-Left)             |
 | TIM4 CH2      | PD13           | DSHOT M2 (Front-Right)            |
@@ -64,9 +66,24 @@ hspi1.Init.MasterInterDataIdleness = SPI_MASTER_INTERDATA_IDLENESS_00CYCLE;
 - 115200 baud, 8N1, TX/RX mode
 - PA2 = TX (AF7), PA3 = RX (AF7)
 - **NVIC interrupt enabled**, priority **8, 0**
-- `HAL_UART_Receive_IT()` armed 1 byte at a time from `RC_Init()`
-- `USART2_IRQHandler` in `stm32h7xx_it.c` calls `HAL_UART_IRQHandler(&huart2)`
-- `HAL_UART_RxCpltCallback` in `main.c` dispatches to `RC_UART_RxCpltCallback()`
+- Direct register RX: `SET_BIT(USART2->CR1, USART_CR1_RXNEIE_RXFNEIE)` armed
+  from `RC_Init()` — bypasses `HAL_UART_Receive_IT` which hangs on STM32H7
+- `USART2_IRQHandler` in `stm32h7xx_it.c` reads `USART2->RDR` directly and
+  calls `RC_UART_RxCpltCallback()`
+
+### CubeMX USART3 Configuration (GPS)
+
+- **9600 baud**, 8N1, TX/RX mode
+- PB10 = TX (AF7), PB11 = RX (AF7)
+- DMA: DMA1_Stream1, USART3_RX request, Peripheral→Memory, byte width,
+  **Circular mode** — continuous ring buffer receive
+- NVIC interrupt enabled (for HAL DMA housekeeping)
+- `GPS_Init()` starts DMA via `HAL_UART_Receive_DMA(&huart3, buf, 256)`
+- `GPS_Update()` polls DMA write head via NDTR each loop iteration
+
+> ⚠️ Do not change USART3 baud from 9600 without first sending a UBX CFG-PRT
+> message to reconfigure the NEO-6M module. The module defaults to 9600 on
+> every cold start.
 
 ### CubeMX TIM4 Configuration (DSHOT300)
 
@@ -76,8 +93,7 @@ hspi1.Init.MasterInterDataIdleness = SPI_MASTER_INTERDATA_IDLENESS_00CYCLE;
 - Auto-Reload Preload: Enabled
 - PWM Mode 1 on CH1–CH4 (PD12–PD15, AF2)
 - DMA: DMA1_Stream0, TIM4_UP request, Memory→Peripheral, word width, Normal mode
-- **OCIdleState is NOT set in CubeMX** — idle-high is enforced in firmware via
-  CCR = 640 (ARR+1) in the DMA TC interrupt and at boot in `gpio.c`
+- `DSHOT_CCR_IDLE = 0` — outputs held idle-LOW between frames (Bluejay requirement)
 
 ### STM32H7 SPI Gotchas
 
@@ -96,32 +112,61 @@ hspi1.Init.MasterInterDataIdleness = SPI_MASTER_INTERDATA_IDLENESS_00CYCLE;
 - **`HAL_TIM_DMABurst_WriteStart` ignores NDTR** on STM32H7 HAL and runs
   continuously regardless of Normal mode setting. Do not use it for DSHOT.
   Use direct DMA register programming instead.
-- **ESC idle-high requirement:** DSHOT signal pins must be driven HIGH from the
-  very first GPIO clock enable. If the pin floats or sits low before TIM4 AF
-  takes over, the ESC misdetects the protocol and fails to arm.
-- **CCR must be forced idle-high after each frame.** With PWM1 mode and
-  `Pulse = 0` (the reset slot value), TIM4 holds the output low between frames.
-  Set `CCR1–CCR4 = ARR+1 = 640` in the DMA transfer-complete ISR to restore
-  idle-high between frames.
+- **DSHOT idle-LOW required for Bluejay.** `DSHOT_CCR_IDLE` must be 0, not
+  ARR+1. Bluejay's stricter state machine rejects all frames when idle is HIGH.
+  BLHeli_S tolerates idle-HIGH but pulses/gallops; Bluejay produces silence.
+- **CCR must be forced idle-LOW after each frame.** Set `CCR1–CCR4 = 0` in the
+  DMA transfer-complete ISR to restore idle-LOW between frames.
 - **Do not force-abort DMA mid-transfer.** `DSHOT_StartDMA()` must wait for the
   previous stream to be disabled (EN bit cleared by TC handler) before
-  re-arming. Force-aborting with `CR &= ~DMA_SxCR_EN` corrupts the in-progress
-  frame and causes intermittent ESC disarm.
-- **DMAMUX** handles DMA request routing on STM32H7. `HAL_DMA_Init()` in
-  `HAL_TIM_Base_MspInit` configures DMAMUX automatically — do not bypass it.
+  re-arming.
 - **IRQ priority:** DMA1_Stream0 must be at higher priority than USART2.
-  Use 0,0 for DMA1_Stream0 and 8,0 for USART2. Equal priorities cause
-  non-deterministic interleaving and intermittent DSHOT corruption.
+  Use 0,0 for DMA1_Stream0 and 8,0 for USART2.
+
+### STM32H7 UART Gotcha — HAL_UART_Receive_IT hangs
+
+`HAL_UART_Receive_IT` hangs on STM32H7 HAL when called after peripheral init
+in certain FIFO/lock states. Workaround for USART2 RC receiver:
+
+1. Unlock handle: `__HAL_UNLOCK(&huart2)`
+2. Clear error flags: `__HAL_UART_CLEAR_FLAG(...)`
+3. Force state: `huart2.gState = HAL_UART_STATE_READY`
+4. Arm RX directly: `SET_BIT(USART2->CR1, USART_CR1_RXNEIE_RXFNEIE)`
+5. Handle in `USART2_IRQHandler` by reading `USART2->RDR` directly
 
 ### CubeMX Regeneration Gotchas
 
-- **MPU Region 1 gets wiped.** CubeMX regeneration resets `MPU_Config()` to
-  only Region 0 (background deny-all). Region 1 (AXI SRAM at `0x24000000`,
-  512KB, write-through cached) must be manually restored after every regen.
-  This region is required for the DSHOT DMA buffer.
+- **MPU_Config() gets wiped.** CubeMX regeneration replaces the custom
+  MPU config with a default 4GB no-access region. The AXI SRAM non-cacheable
+  region (Region 0, `0x24000000`, 512KB, TEX=1 C=0 B=0) required for DMA
+  buffers must be manually restored after every regen.
 - **USER CODE blocks:** All user code must be inside `/* USER CODE BEGIN */` /
   `/* USER CODE END */` markers. Includes, defines, and callbacks placed outside
   are silently wiped on regen.
+- **`while(1)` closing brace** can be lost on regen — always verify `main.c`
+  compiles cleanly after regeneration.
+
+### Linker Script
+
+File: `STM32H723XG_FLASH.ld`
+
+A custom `.AXI_SRAM` output section was added to place DMA buffers in the
+non-cacheable RAM_D1 region:
+
+```ld
+.AXI_SRAM (NOLOAD) :
+{
+  . = ALIGN(4);
+  *(.AXI_SRAM)
+  *(.AXI_SRAM*)
+  . = ALIGN(4);
+} >RAM_D1
+```
+
+Any buffer shared between CPU and DMA should use:
+```c
+__attribute__((section(".AXI_SRAM")))
+```
 
 ---
 
@@ -182,52 +227,36 @@ The BMI323 clocks in the first 3 bytes and ignores the trailing dummy.
 WriteReg(0x10, 0x0000);  /* FEATURE_IO0 — clear          */
 WriteReg(0x12, 0x012C);  /* FEATURE_IO2 — startup config */
 WriteReg(0x14, 0x0001);  /* FEATURE_IO_STATUS — trigger  */
-WriteReg(0x40, 0x0001);  /* FEATURE_CTRL — enable        */
-/* Poll 0x11 (FEATURE_IO1) bit[3:0] == 0x01 for ready    */
+WriteReg(0x40, 0x0001);  /* FEATURE_CTRL — enable engine */
+/* Poll FEATURE_IO1 until lower nibble == 0x01 (ready) or 0x03 (error) */
 ```
 
-### Register Map (used registers)
+### Level Calibration
 
-| Register        | Address | Notes                                         |
-|-----------------|---------|-----------------------------------------------|
-| CHIP_ID         | 0x00    | Returns 0x43                                  |
-| ACC_DATA        | 0x03    | Burst read 6 bytes for X/Y/Z accel (LSB first)|
-| GYR_DATA        | 0x06    | Burst read 6 bytes for X/Y/Z gyro (LSB first) |
-| FEATURE_IO0     | 0x10    | Feature engine config                         |
-| FEATURE_IO1     | 0x11    | Feature engine status (poll bit[3:0] == 0x01) |
-| FEATURE_IO2     | 0x12    | Feature engine startup config                 |
-| FEATURE_IO_ST   | 0x14    | Feature engine trigger                        |
-| ACC_CONF        | 0x20    | Accel mode, ODR, range                        |
-| GYR_CONF        | 0x21    | Gyro mode, ODR, range                         |
-| FEATURE_CTRL    | 0x40    | Feature engine enable                         |
-| CMD             | 0x7E    | Soft reset (write 0xDEAF)                     |
+A 2-second calibration routine runs at boot (200 samples × 10ms). The last
+50 samples are averaged to compute `imu_roll_offset` and `imu_pitch_offset`,
+which are subtracted from fusion output every loop. Typical values at rest on
+a flat bench: roll ≈ +1.4°, pitch ≈ −1.9°.
 
 ---
 
-## GY-271 Magnetometer (QMC5883P)
+## QMC5883P Magnetometer (FORIOT GY-271 — Amazon B0CFLPKTP1)
 
-> ⚠️ The GY-271 module sold as "QMC5883L" on Amazon (B0CFLPKTP1) actually
-> contains a **QMC5883P** — a completely different chip with a different
-> register map. The two are not compatible. The driver has been written
-> for the QMC5883P specifically.
+> ⚠️ This is the **QMC5883P**, not the common QMC5883L. They are completely
+> different chips with different register maps, I2C addresses, and chip IDs.
+> Do not use QMC5883L libraries or documentation.
 
-### I2C Address
-
-- **Default:** `0x2C` — ADDR pin is pulled high on the PCB
-- **HAL 8-bit shifted address:** `0x2C << 1 = 0x58`
-
-### Chip ID
-
-- **Register:** `0x00`
-- **Expected value:** `0x80` ✅ confirmed on hardware
-- **QMC5883L comparison:** QMC5883L uses register `0x0D` → `0xFF` — completely different
+- **Interface:** I2C at 400 kHz
+- **I2C address: `0x2C`** — ADDR pin pulled HIGH on this PCB
+- **Chip ID: `0x80`** at register `0x00`
+- **VCC:** 3.3V
 
 ### Register Map (used registers)
 
 | Register | Address | Notes                                          |
 |----------|---------|------------------------------------------------|
 | CHIP_ID  | 0x00    | Returns 0x80                                   |
-| XOUT_L   | 0x01    | Burst read 6 bytes for X/Y/Z (LSB first)      |
+| XOUT_L   | 0x01    | Burst read 6 bytes for X/Y/Z (LSB first)       |
 | XOUT_H   | 0x02    |                                                |
 | YOUT_L   | 0x03    |                                                |
 | YOUT_H   | 0x04    |                                                |
@@ -237,14 +266,13 @@ WriteReg(0x40, 0x0001);  /* FEATURE_CTRL — enable        */
 | CTRL     | 0x0A    | Mode, ODR, RNG, OSR config                    |
 
 > ⚠️ QMC5883P has **no FBR register** (0x0B). Do not write to it.
-> Writing 0x0B on this chip targets an undefined/reserved register.
 
 ### CTRL Configuration (0x0A)
 CTRL = 0x09
-OSR1[7:6] = 00  → Over-sample ratio 1 (low power)
-RNG[5:4]  = 00  → ±30 Gauss full scale
-ODR[3:2]  = 10  → 100 Hz output data rate
-MODE[1:0] = 01  → Normal mode (continuous measurement)
+- OSR1[7:6] = 00 → Over-sample ratio 1 (low power)
+- RNG[5:4]  = 00 → ±30 Gauss full scale
+- ODR[3:2]  = 10 → 100 Hz output data rate
+- MODE[1:0] = 01 → Normal mode (continuous measurement)
 
 ### Initialization Sequence
 
@@ -276,6 +304,45 @@ DRDY pin not connected — polling used instead.
 - To calibrate: rotate the FC slowly through 360° in yaw, record min/max
   for X and Y, then set `offset_x = (max_x + min_x) / 2`,
   `offset_y = (max_y + min_y) / 2`
+
+---
+
+## GY-NEO6MV2 GPS Module (u-blox NEO-6M)
+
+- **Interface:** UART at 9600 baud (default, no configuration required)
+- **Protocol:** NMEA 0183 — `$GPRMC` and `$GPGGA` sentences parsed
+- **VCC:** 5V (onboard 3.3V LDO regulator) — powered from FC 5V header pin
+  during bench testing; switch to PDB 5V BEC when flying on battery
+- **Logic levels:** 3.3V — directly compatible with STM32H7, no level shifter
+- **Antenna:** Passive ceramic patch — requires unobstructed sky view
+- **Cold start:** 30–120 seconds to first fix outdoors; will not fix indoors
+
+### Wiring (NEO-6M → FK723M1)
+
+| GPS Pin | FK723M1 Pin | Notes                        |
+|---------|-------------|------------------------------|
+| VCC     | 5V header   | FC USB/PDB 5V rail           |
+| GND     | GND         | Common ground                |
+| TX      | PB11        | GPS transmits → STM32 RX     |
+| RX      | unconnected | Not needed for receive-only  |
+
+### Output Fields (SAE units)
+
+| Field        | Unit           | Source sentence |
+|--------------|----------------|-----------------|
+| latitude     | decimal degrees | GPRMC / GNRMC  |
+| longitude    | decimal degrees | GPRMC / GNRMC  |
+| altitude_ft  | feet MSL        | GPGGA / GNGGA  |
+| speed_mph    | miles per hour  | GPRMC / GNRMC  |
+| course_deg   | degrees true    | GPRMC / GNRMC  |
+| satellites   | count           | GPGGA / GNGGA  |
+| fix_valid    | 0/1             | GPRMC status   |
+
+### Mounting Notes
+
+- Mount on top of quad with unobstructed 180° sky view
+- Keep away from ESCs, high-current power wires, and carbon fiber
+- Plan top-plate CAD mount alongside Ruko R111S Remote ID module
 
 ---
 
@@ -328,16 +395,13 @@ DFU mode. Then immediately run the PlatformIO upload command.
 #define ADC_DEADBAND 40     // raw counts either side of center
 ```
 
-Measure with `Serial.printf` of raw `analogRead()` at stick extremes per axis.
-Update `reversed` parameter in `map_stick()` calls per axis after confirming
-direction.
-
 ---
 
-## ESCs — Readytosky 35A BLHeli_S
+## ESCs — Readytosky 35A BLHeli_S + Bluejay Firmware
 
 - Signal wire: White
 - Ground wire: Black
+- **Firmware: Bluejay** (replaces stock BLHeli_S)
 - Motor mapping (X-frame convention):
 
 | Motor | Position    | Spin | DSHOT Pin |
@@ -347,15 +411,16 @@ direction.
 | M3    | Rear-Right  | CCW  | PD14      |
 | M4    | Rear-Left   | CW   | PD15      |
 
-### BLHeli_S Configuration (confirmed)
+### Bluejay-Specific Notes
 
-- Firmware: J-H-25, BLHeli_S 16.7
-- Protocol: DSHOT (digital — PPM values ignored)
-- **Demag Compensation:** High (changed from default Low on all 4 ESCs)
-- All other settings: defaults (Startup Power 0.50, Motor Timing Medium,
-  Low RPM Power Protect On)
-- ESC numbering in BLHeliSuite: ESC#1, #3, #4, #7
-- Config backed up to `config/esc_blheli_setup.ini`
+- **CRC is non-inverted:** `(v ^ v>>4 ^ v>>8) & 0xF` — opposite of the
+  published DSHOT spec (`~(v ^ v>>4 ^ v>>8) & 0xF`). FLARE firmware uses
+  non-inverted CRC to match Bluejay.
+- **Idle state must be LOW.** Bluejay's stricter frame sync rejects all frames
+  if the signal idles HIGH between frames. `DSHOT_CCR_IDLE = 0`.
+- **Telemetry bit:** kept at 0 — bidirectional DSHOT not enabled.
+- **DSHOT throttle range:** 48 (minimum) to 2047 (maximum). Values 1–47 are
+  reserved special commands. 0 = disarm/stop.
 
 ### BLHeliSuite 4-Way Interface Setup
 
@@ -385,22 +450,19 @@ direction.
 - **Soft-mount the FC stack.** Motor vibration aliasing into the IMU is the
   primary cause of PID instability in DIY flight controllers. Use silicone
   grommets or O-ring standoffs — never hard-mount.
-- **3.3V logic throughout.** BMI323, QMC5883P, ESP32 UART, and STM32H7 GPIO
-  are all 3.3V compatible. Do not expose any signal line to 5V.
+- **3.3V logic throughout.** BMI323, QMC5883P, NEO-6M TX, ESP32 UART, and
+  STM32H7 GPIO are all 3.3V compatible. Do not expose any signal line to 5V.
+- **GPS power:** Power GPS from 5V (FC header or PDB BEC), not the FC 3.3V
+  rail. GPS draws ~50mA acquisition / ~20mA tracking — enough to brown out the
+  STM32 logic rail under combined load.
 - **Magnetometer placement:** Mount the GY-271 away from motors, ESCs, and
-  power wires — these are sources of magnetic interference that will corrupt
-  heading readings. Calibrate after final mounting position is fixed.
-- **ESC keepalive:** BLHeli_S disarms if no valid DSHOT frame is received for
-  ~250ms. The main loop must call `DSHOT_SendThrottle(0,0,0,0)` every
-  iteration even when not commanding thrust.
+  power wires. Calibrate after final mounting position is fixed.
+- **ESC keepalive:** Bluejay disarms if no valid DSHOT frame is received for
+  ~250ms. The main loop sends DSHOT 0 every iteration as a keepalive.
 - **STM32 power during ESC work:** Power the STM32 via PDB 5V BEC (not USB-C)
   whenever ESCs are powered — both must share a common ground reference.
-- **Loop timing:** The 100Hz loop runs at approximately 20ms per iteration
-  (10ms `HAL_Delay` + ~10ms for IMU reads, UART print, and DSHOT). This is
-  well within BLHeli_S's 250ms keepalive window. The mag DRDY poll (20 × 1ms)
-  was the original cause of 60ms loop time when the mag was absent — fixed by
-  gating reads behind `mag_ok`.
+- **Do not flash STM32 via ST-Link while ESP32 shares USB power rail.** ST-Link
+  reset can glitch the 3.3V rail and corrupt ESP32 flash mid-write.
 - **Loose connections:** Dupont/header pin connections can work loose between
-  sessions without any visible damage. If previously working hardware stops
-  working, reseat all connectors on the affected signal path before
-  troubleshooting firmware or wiring.
+  sessions. If previously working hardware stops working, reseat all connectors
+  before troubleshooting firmware.
