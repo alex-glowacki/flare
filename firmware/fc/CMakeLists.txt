@@ -49,6 +49,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/flare.c
     Core/Src/mag.c
     Core/Src/rc.c
+    Core/Src/gps.c
 )
 
 # Add include paths

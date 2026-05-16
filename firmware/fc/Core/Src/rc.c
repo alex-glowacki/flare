@@ -5,6 +5,7 @@
 
 #include "main.h"
 #include "rc.h"
+#include "stm32h7xx_hal_uart.h"
 #include "usart.h"
 #include "flare_protocol.h"
 #include <string.h>
@@ -46,7 +47,7 @@ void RC_Init(void)
     rc_init_status     = 0xFF;
     rc_rearm_failures  = 0;
     rc_error_callbacks = 0;
-    rc_crc_failures = 0;
+    rc_crc_failures    = 0;
     memset(&rc_packet, 0, sizeof(rc_packet));
 
     __HAL_UNLOCK(&huart2);

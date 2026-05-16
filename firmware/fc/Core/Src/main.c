@@ -21,7 +21,6 @@
 #include "dma.h"
 #include "i2c.h"
 #include "spi.h"
-#include "stm32h7xx_it.h"
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
@@ -31,6 +30,7 @@
 #include "dshot.h"
 #include "flare.h"
 #include "flare_protocol.h"
+#include "gps.h"
 #include "imu_fusion.h"
 #include "mag.h"
 #include "rc.h"
@@ -107,6 +107,8 @@ MAG_Cal_t mag_cal;  /* hard-iron offsets — zero until calibrated */
 float mag_heading;  /* degrees [0, 360), updated each loop       */
 
 static FLARE_RC_Packet_t rc_pkt = {0};  /* persists across loop iterations */
+
+GPS_Data_t gps_data;  /* latest parsed GPS fix, updated each loop */
 
 /* USER CODE END PV */
 
@@ -250,11 +252,11 @@ int main(void)
   /* USER CODE BEGIN 1 */
   /* USER CODE END 1 */
 
-  /* MCU Configuration--------------------------------------------------------*/
-  HAL_Init();
-
   /* MPU Configuration--------------------------------------------------------*/
   MPU_Config();
+
+  /* MCU Configuration--------------------------------------------------------*/
+  HAL_Init();
 
   /* USER CODE BEGIN Init */
   /* USER CODE END Init */
@@ -273,24 +275,15 @@ int main(void)
   MX_I2C1_Init();
   MX_USART2_UART_Init();
   MX_TIM6_Init();
+  MX_USART3_UART_Init();
 
   /* USER CODE BEGIN 2 */
 
-    /* msg declared early so it is available throughout entire init sequence */
     char msg[128];
     uint32_t loop_count = 0;
 
-    HAL_Delay(10);   /* allow USART2 to fully settle before arming IT */
+    HAL_Delay(10);
 
-    /*
-     * DSHOT init and TIM6 MUST both start before the arming loop.
-     * Bluejay auto-detects protocol during the first frames it receives.
-     * TIM6 drives the 1kHz DSHOT ISR — without it running, frames during
-     * the arming loop are sent ad-hoc from the main loop at inconsistent
-     * timing, which can cause Bluejay to misidentify the protocol or fail
-     * to arm. Starting TIM6 immediately after DSHOT_Init() ensures Bluejay
-     * sees clean, consistent 1kHz DSHOT300 frames from frame zero.
-     */
     DSHOT_Init();
     UART_Print("[DSHOT] driver ready\r\n");
 
@@ -301,11 +294,6 @@ int main(void)
              HAL_GetTick());
     UART_Print(msg);
 
-    /*
-     * Arming loop: 800 × 10ms = 8s of DSHOT 0 frames.
-     * TIM6 ISR sends the actual frames at 1kHz — HAL_Delay here just
-     * keeps the loop alive for the required duration.
-     */
     for (int i = 0; i < 800; i++) {
         HAL_Delay(10);
     }
@@ -329,15 +317,12 @@ int main(void)
     snprintf(msg, sizeof(msg), "[IMU] WHO_AM_I    = 0x%02X (expect 0x43)\r\n",
              who_am_i_result & 0x00FF);
     UART_Print(msg);
-
     snprintf(msg, sizeof(msg), "[IMU] ACC default = 0x%04X\r\n",
              acc_conf_default);
     UART_Print(msg);
-
     snprintf(msg, sizeof(msg), "[IMU] ACC write   = 0x%04X (expect 0x4028)\r\n",
              acc_conf_readback);
     UART_Print(msg);
-
     snprintf(msg, sizeof(msg), "[IMU] GYR write   = 0x%04X (expect 0x4048)\r\n",
              gyr_conf_readback);
     UART_Print(msg);
@@ -366,9 +351,12 @@ int main(void)
     UART_Print(msg);
     UART_Print("[RC] USART2 receiver ready\r\n");
 
+    /* ── GPS init ───────────────────────────────────────────────────────── */
+    GPS_Init(&huart3, &gps_data);
+    UART_Print("[GPS] USART3 DMA receiver ready\r\n");
+    UART_Print("[GPS] waiting for fix (may take 30-120s outdoors)...\r\n");
+
     /* ── IMU level calibration ───────────────────────────────────────────── */
-    /* 200 samples × 10ms = 2s. Filter converges in ~150 samples; average    */
-    /* the last 50 as the ground-level offset applied every loop thereafter.  */
     UART_Print("[CAL] Hold still — levelling IMU (2s)...\r\n");
     float imu_roll_offset  = 0.0f;
     float imu_pitch_offset = 0.0f;
@@ -425,6 +413,9 @@ int main(void)
         float roll_corr  = imu_fusion.roll  - imu_roll_offset;
         float pitch_corr = imu_fusion.pitch - imu_pitch_offset;
 
+        /* ── GPS tick ───────────────────────────────────────────────────── */
+        GPS_Update(&gps_data);
+
         /* ── RC packet consumption ──────────────────────────────────────── */
         if (RC_GetPacket(&rc_pkt)) {
             snprintf(msg, sizeof(msg),
@@ -444,12 +435,9 @@ int main(void)
             FLARE_SetPitchSP  (((float)rc_pkt.pitch   - 1500.0f) * (30.0f  / 500.0f));
             FLARE_SetYawRateSP(((float)rc_pkt.yaw     - 1500.0f) * (200.0f / 500.0f));
 
-            /* Map RC throttle [1000, 2000] → DSHOT [48, 2047] */
             uint16_t dshot_thr = (uint16_t)(
                 ((float)(rc_pkt.throttle - 1000) / 1000.0f)
                 * (2047.0f - 48.0f) + 48.0f);
-
-            /* DSHOT values 1–47 are reserved special commands; 48 is min throttle */
             if (dshot_thr < 48) dshot_thr = 48;
 
             FLARE_SetThrottle(dshot_thr);
@@ -484,13 +472,25 @@ int main(void)
                  RC_IsHealthy() ? "OK" : "LOST");
         UART_Print(msg);
 
-        if (++loop_count % 100 == 0) {
+        /* ── GPS telemetry print (once per second = every 100 loops) ────── */
+        if (loop_count % 100 == 0) {
+            snprintf(msg, sizeof(msg),
+                     "[GPS] fix=%u sats=%u lat=%.6f lon=%.6f alt=%.1fft spd=%.1fmph\r\n",
+                     gps_data.fix_valid,
+                     gps_data.satellites,
+                     (double)gps_data.latitude,
+                     (double)gps_data.longitude,
+                     (double)gps_data.altitude_ft,
+                     (double)gps_data.speed_mph);
+            UART_Print(msg);
+
             snprintf(msg, sizeof(msg),
                      "[DIAG] send=%lu tc=%lu\r\n",
                      dshot_send_count, dshot_tc_count);
             UART_Print(msg);
         }
 
+        ++loop_count;
         HAL_Delay(IMU_LOOP_INTERVAL_MS);
 
     /* USER CODE END 3 */
@@ -559,13 +559,11 @@ void MPU_Config(void)
     HAL_MPU_Disable();
 
     /*
-     * Region 0: DSHOT DMA buffer in AXI SRAM (0x24000000, 512KB)
+     * Region 0: AXI SRAM (0x24000000, 512KB) — Non-cacheable.
      *
-     * Non-cacheable so CPU writes are immediately visible to DMA
-     * without requiring explicit cache flush operations.
-     *
+     * The DSHOT DMA buffer lives here. Non-cacheable ensures CPU writes
+     * are immediately visible to DMA without explicit cache flush calls.
      * TEX=1, C=0, B=0 = Normal memory, Non-cacheable.
-     * This is the correct policy for any buffer shared between CPU and DMA.
      */
     MPU_InitStruct.Enable             = MPU_REGION_ENABLE;
     MPU_InitStruct.Number             = MPU_REGION_NUMBER0;

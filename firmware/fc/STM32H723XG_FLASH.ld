@@ -4,7 +4,7 @@
 
 **  File        : LinkerScript.ld
 **
-**  Author		: STM32CubeMX
+**  Author              : STM32CubeMX
 **
 **  Abstract    : Linker script for STM32H723ZGTx series
 **                1024Kbytes FLASH and 560Kbytes RAM
@@ -16,7 +16,7 @@
 **
 **  Target      : STMicroelectronics STM32
 **
-**  Distribution: The file is distributed “as is,” without any warranty
+**  Distribution: The file is distributed "as is," without any warranty
 **                of any kind.
 **
 *****************************************************************************
@@ -241,7 +241,21 @@ SECTIONS
     . = ALIGN(8);
   } >DTCMRAM
 
-
+  /*
+   * DMA-safe buffers in AXI SRAM (RAM_D1, 0x24000000).
+   *
+   * MPU_Config() in main.c marks this region non-cacheable (TEX=1, C=0, B=0)
+   * so CPU writes are immediately visible to DMA without cache flush calls.
+   * Place any buffer shared between CPU and DMA here using:
+   *   __attribute__((section(".AXI_SRAM")))
+   */
+  .AXI_SRAM (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.AXI_SRAM)
+    *(.AXI_SRAM*)
+    . = ALIGN(4);
+  } >RAM_D1
 
   /* Remove information from the standard libraries */
   /DISCARD/ :
