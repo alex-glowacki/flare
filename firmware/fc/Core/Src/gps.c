@@ -1,224 +1,235 @@
+/* firmware/fc/Core/Src/gps.c
+ *
+ * UBX binary parser for the HGLRC M100-5883 (u-blox M10).
+ * Parses UBX-NAV-PVT (class 0x01, ID 0x07) — the single all-in-one
+ * position/velocity/time message. No NMEA parsing needed.
+ *
+ * DMA runs in circular mode on USART3 at 115200 baud.
+ * GPS_Update() is called each 10ms loop tick to drain the ring buffer.
+ */
 #include "gps.h"
 #include "stm32h7xx_hal_dma.h"
 #include "stm32h7xx_hal_uart.h"
 #include "usart.h"
-#include <string.h>
-#include <stdlib.h>
 #include "stm32h7xx_hal.h"
+#include <string.h>
 
 /* ── Unit conversion constants ───────────────────────────────────────── */
-#define KNOTS_TO_MPH    1.15078f    /* 1 knot = 1.15078 mph */
-#define METERS_TO_FEET  3.28084f    /* 1 meter = 3.28084 feet */
+#define MS_TO_MPH       2.23694f    /* 1 m/s = 2.23694 mph               */
+#define MM_TO_FEET      0.00328084f /* 1 mm  = 0.00328084 ft             */
+
+/* ── UBX-NAV-PVT payload layout (92 bytes, all little-endian) ───────────
+ * Only the fields we use are listed. Full spec: u-blox M10 interface manual.
+ *
+ *  Offset  Size  Field
+ *  ------  ----  -----
+ *    0      4    iTOW        ms GPS time of week (unused)
+ *    4      2    year        (unused)
+ *    ...
+ *   20      1    fixType     0=none 1=DR 2=2D 3=3D 4=GNSS+DR 5=time only
+ *   21      1    flags       bit0 = gnssFixOK (valid fix)
+ *   22      1    flags2      (unused)
+ *   23      1    numSV       number of satellites used
+ *   24      4    lon         deg × 1e-7, signed
+ *   28      4    lat         deg × 1e-7, signed
+ *   32      4    height      mm above ellipsoid (unused)
+ *   36      4    hMSL        mm above mean sea level → altitude_ft
+ *   40      4    hAcc        mm horizontal accuracy (unused)
+ *   44      4    vAcc        mm vertical accuracy (unused)
+ *   48      4    velN        mm/s NED north velocity (unused)
+ *   52      4    velE        mm/s NED east velocity (unused)
+ *   56      4    velD        mm/s NED down velocity (unused)
+ *   60      4    gSpeed      mm/s ground speed → speed_ms, speed_mph
+ *   64      4    headMot     deg × 1e-5 heading of motion → course_deg
+ *   68      4    sAcc        mm/s speed accuracy (unused)
+ *   72      4    headAcc     deg × 1e-5 heading accuracy (unused)
+ *   76      2    pDOP        (unused)
+ *   78      6    reserved
+ *   84      4    headVeh     deg × 1e-5 heading of vehicle (unused)
+ *   88      4    magDec      deg × 1e-2 magnetic declination (unused)
+ */
+#define PVT_OFFSET_FIX_TYPE  20U
+#define PVT_OFFSET_FLAGS     21U
+#define PVT_OFFSET_NUM_SV    23U
+#define PVT_OFFSET_LON       24U
+#define PVT_OFFSET_LAT       28U
+#define PVT_OFFSET_HMSL      36U
+#define PVT_OFFSET_GSPEED    60U
+#define PVT_OFFSET_HEAD_MOT  64U
+
+#define UBX_NAV_PVT_PAYLOAD_LEN  92U
 
 /* ── Module-private state ────────────────────────────────────────────── */
 
-/* DMA circular receive buffer — must live in the non-cacheable AXI SRAM
- * region (0x24000000) configured by MPU_Config() in main.c.
- * CPU reads are immediately coherent with DMA writes — no cache flush needed. */
+/* DMA circular receive buffer — non-cacheable AXI SRAM region
+ * (0x24000000) configured by MPU_Config() in main.c.                    */
 static uint8_t gps_dma_buf[GPS_DMA_BUF_SIZE] __attribute__((section(".AXI_SRAM")));
 
-static uint16_t gps_dma_tail = 0;
-static UART_HandleTypeDef *gps_huart = NULL;
+static uint16_t           gps_dma_tail = 0;
+static UART_HandleTypeDef *gps_huart   = NULL;
+
+/* ── UBX parser state machine ────────────────────────────────────────── */
+typedef enum {
+    UBX_STATE_SYNC1,    /* waiting for 0xB5                               */
+    UBX_STATE_SYNC2,    /* waiting for 0x62                               */
+    UBX_STATE_CLASS,    /* message class byte                             */
+    UBX_STATE_ID,       /* message ID byte                                */
+    UBX_STATE_LEN1,     /* payload length LSB                             */
+    UBX_STATE_LEN2,     /* payload length MSB                             */
+    UBX_STATE_PAYLOAD,  /* collecting payload bytes                       */
+    UBX_STATE_CK_A,     /* first checksum byte                            */
+    UBX_STATE_CK_B,     /* second checksum byte → dispatch on match       */
+} UBX_State_t;
+
+static UBX_State_t ubx_state    = UBX_STATE_SYNC1;
+static uint8_t     ubx_class    = 0;
+static uint8_t     ubx_id       = 0;
+static uint16_t    ubx_len      = 0;
+static uint16_t    ubx_pay_idx  = 0;
+static uint8_t     ubx_ck_a     = 0;
+static uint8_t     ubx_ck_b     = 0;
+static uint8_t     ubx_payload[GPS_UBX_MAX_LEN];
 
 /* ── Internal helpers ────────────────────────────────────────────────── */
 
-/**
- * @brief  Convert NMEA lat/lon field + hemisphere to signed decimal degrees.
- *         NMEA format: DDDMM.MMMMM  (degrees concatenated with decimal minutes)
- *         e.g. "4807.038" + 'N' → +48.1173°
- */
-static float nmea_to_decimal(const char *field, char hemi) {
-    if (field == NULL || field[0] == '\0') return 0.0f;
-
-    float raw = strtof(field, NULL);
-    int degrees = (int)(raw / 100.0f);
-    float minutes = raw - (float)(degrees * 100);
-    float decimal = (float)degrees + (minutes / 60.0f);
-
-    if (hemi == 'S' || hemi == 'W') decimal = -decimal;
-    return decimal;
- }
-
-/**
- * @brief  Extract the Nth comma-delimited field from an NMEA sentence.
- *         Field index 0 = sentence ID (e.g. "$GPRMC").
- */
-static void nmea_get_field(const char *sentence, uint8_t field_idx, char *out_buf, uint8_t out_len) {
-    out_buf[0] = '\0';
-    uint8_t current = 0;
-    const char *p = sentence;
-
-    while (*p) {
-        if (*p == ',') { current++; p++; continue; }
-        if (current == field_idx) {
-            uint8_t i = 0;
-            while (*p && *p != ',' && *p != '*' && i < (out_len - 1u)) {
-                out_buf[i++] = *p++;
-            }
-            out_buf[i] = '\0';
-            return;
-        }
-        p++;
-    }
- }
-
-/**
- * @brief  Validate NMEA XOR checksum.
- *         Format: $<data>*<XX>   Checksum = XOR of bytes between $ and *.
- * @return 1 if valid, 0 otherwise.
- */
-static uint8_t nmea_checksum_valid(const char *sentence) {
-    const char *p = sentence;
-    if (*p == '$') p++;
-
-    uint8_t calc = 0;
-    while (*p && *p != '*') calc ^= (uint8_t)(*p++);
-    if (*p != '*') return 0;
-
-    p++;
-    uint8_t recv = (uint8_t)strtol(p, NULL, 16);
-    return (calc == recv) ? 1u : 0u;
+static int32_t read_i32_le(const uint8_t *buf, uint16_t offset) {
+    return (int32_t)(
+        (uint32_t)buf[offset]               |
+        ((uint32_t)buf[offset + 1U] << 8U)  |
+        ((uint32_t)buf[offset + 2U] << 16U) |
+        ((uint32_t)buf[offset + 3U] << 24U)
+    );
 }
 
-/**
- * @brief  Parse $GPRMC / $GNRMC sentence.
- *
- *  Index  Content
- *  -----  -------
- *    0    $GPRMC
- *    1    HHMMSS.ss   UTC time (unused)
- *    2    A/V         A = valid, V = void
- *    3    DDMM.MMMM   latitude
- *    4    N/S
- *    5    DDDMM.MMMM  longitude
- *    6    E/W
- *    7    SSS.SS      speed over ground, knots  → converted to mph
- *    8    DDD.DD      track angle, degrees true
- *    9    DDMMYY      date (unused)
- */
-static void parse_gprmc(const char *sentence, GPS_Data_t *data) {
-    char field[16];
+static void parse_nav_pvt(const uint8_t *payload, GPS_Data_t *data) {
+    uint8_t fix_type = payload[PVT_OFFSET_FIX_TYPE];
+    uint8_t flags    = payload[PVT_OFFSET_FLAGS];
 
-    nmea_get_field(sentence, 2, field, sizeof(field));
-    if (field[0] != 'A') { data->fix_valid = 0; return; }
+    /* gnssFixOK is bit 0 of flags. Require at least a 3D fix. */
+    if ((flags & 0x01U) == 0U || fix_type < 3U) {
+        data->fix_valid = 0;
+        data->fix_type  = fix_type;
+        return;
+    }
 
-    char lat_str[16], lat_hemi[4];
-    nmea_get_field(sentence, 3, lat_str, sizeof(lat_str));
-    nmea_get_field(sentence, 4, lat_hemi, sizeof(lat_hemi));
-    data->latitude = nmea_to_decimal(lat_str, lat_hemi[0]);
+    data->fix_type   = fix_type;
+    data->satellites = payload[PVT_OFFSET_NUM_SV];
 
-    char lon_str[16], lon_hemi[4];
-    nmea_get_field(sentence, 5, lon_str, sizeof(lon_str));
-    nmea_get_field(sentence, 6, lon_hemi, sizeof(lon_hemi));
-    data->longitude = nmea_to_decimal(lon_str, lon_hemi[0]);
+    /* Latitude / longitude: degrees × 1e-7 → decimal degrees */
+    data->latitude  = (float)read_i32_le(payload, PVT_OFFSET_LAT) * 1e-7f;
+    data->longitude = (float)read_i32_le(payload, PVT_OFFSET_LON) * 1e-7f;
 
-    /* Speed: knots → mph */
-    nmea_get_field(sentence, 7, field, sizeof(field));
-    data->speed_mph = strtof(field, NULL) * KNOTS_TO_MPH;
+    /* Altitude MSL: mm → feet */
+    data->altitude_ft = (float)read_i32_le(payload, PVT_OFFSET_HMSL)
+                        * MM_TO_FEET;
 
-    /* Course */
-    nmea_get_field(sentence, 8, field, sizeof(field));
-    data->course_deg = strtof(field, NULL);
+    /* Ground speed: mm/s → m/s and mph */
+    int32_t gspeed_mms = read_i32_le(payload, PVT_OFFSET_GSPEED);
+    data->speed_ms  = (float)gspeed_mms * 0.001f;
+    data->speed_mph = data->speed_ms * MS_TO_MPH;
 
-    data->fix_valid = 1;
+    /* Heading of motion: deg × 1e-5 → degrees */
+    data->course_deg = (float)read_i32_le(payload, PVT_OFFSET_HEAD_MOT)
+                       * 1e-5f;
+
+    data->fix_valid   = 1;
     data->last_fix_ms = HAL_GetTick();
 }
 
-/**
- * @brief  Parse $GPGGA / $GNGGA sentence.
- *
- *  Index  Content
- *  -----  -------
- *    0    $GPGGA
- *    1    HHMMSS.ss   UTC time (unused)
- *    2    latitude
- *    3    N/S
- *    4    longitude
- *    5    E/W
- *    6    fix quality (0 = invalid)
- *    7    satellites in use
- *    8    HDOP (unused)
- *    9    altitude, metres above MSL  → converted to feet
- */
-static void parse_gpgga(const char *sentence, GPS_Data_t *data) {
-    char field[16];
+static void ubx_feed_byte(uint8_t c, GPS_Data_t *data) {
+    switch (ubx_state) {
 
-    nmea_get_field(sentence, 6, field, sizeof(field));
-    if (field[0] == '0' || field[0] == '\0') return;    /* no fix */
+        case UBX_STATE_SYNC1:
+            if (c == UBX_SYNC1) ubx_state = UBX_STATE_SYNC2;
+            break;
 
-    nmea_get_field(sentence, 7, field, sizeof(field));
-    data->satellites = (uint8_t)strtol(field, NULL, 10);
+        case UBX_STATE_SYNC2:
+            ubx_state = (c == UBX_SYNC2) ? UBX_STATE_CLASS : UBX_STATE_SYNC1;
+            break;
 
-    /* Altitude: meters → feet */
-    nmea_get_field(sentence, 9, field, sizeof(field));
-    data->altitude_ft = strtof(field, NULL) * METERS_TO_FEET;
-}
+        case UBX_STATE_CLASS:
+            ubx_class = c;
+            ubx_ck_a  = c;
+            ubx_ck_b  = c;
+            ubx_state = UBX_STATE_ID;
+            break;
 
-/**
- * @brief  Dispatch a complete, checksum-validated NMEA sentence.
- *         Only GPRMC/GNRMC and GPGGA/GNGGA are handled; all others dropped.
- */
-static void nmea_dispatch(const char *sentence, GPS_Data_t *data) {
-    if (!nmea_checksum_valid(sentence)) return;
+        case UBX_STATE_ID:
+            ubx_id    = c;
+            ubx_ck_a += c; ubx_ck_b += ubx_ck_a;
+            ubx_state = UBX_STATE_LEN1;
+            break;
 
-    if (strncmp(sentence, "$GPRMC", 6) == 0 ||
-        strncmp(sentence, "$GNRMC", 6) == 0) { parse_gprmc(sentence, data); }
-    else if (strncmp(sentence, "$GPGGA", 6) == 0 ||
-             strncmp(sentence, "$GNGGA", 6) == 0) { parse_gpgga(sentence, data); }
+        case UBX_STATE_LEN1:
+            ubx_len   = c;
+            ubx_ck_a += c; ubx_ck_b += ubx_ck_a;
+            ubx_state = UBX_STATE_LEN2;
+            break;
+
+        case UBX_STATE_LEN2:
+            ubx_len  |= ((uint16_t)c << 8U);
+            ubx_ck_a += c; ubx_ck_b += ubx_ck_a;
+            ubx_pay_idx = 0;
+            if (ubx_len == 0U || ubx_len > GPS_UBX_MAX_LEN) {
+                ubx_state = UBX_STATE_SYNC1;
+            } else {
+                ubx_state = UBX_STATE_PAYLOAD;
+            }
+            break;
+
+        case UBX_STATE_PAYLOAD:
+            if (ubx_pay_idx < GPS_UBX_MAX_LEN) {
+                ubx_payload[ubx_pay_idx] = c;
+            }
+            ubx_pay_idx++;
+            ubx_ck_a += c; ubx_ck_b += ubx_ck_a;
+            if (ubx_pay_idx >= ubx_len) {
+                ubx_state = UBX_STATE_CK_A;
+            }
+            break;
+
+        case UBX_STATE_CK_A:
+            ubx_state = (c == ubx_ck_a) ? UBX_STATE_CK_B : UBX_STATE_SYNC1;
+            break;
+
+        case UBX_STATE_CK_B:
+            if (c == ubx_ck_b) {
+                if (ubx_class == UBX_CLASS_NAV &&
+                    ubx_id    == UBX_ID_NAV_PVT &&
+                    ubx_len   == UBX_NAV_PVT_PAYLOAD_LEN) {
+                    parse_nav_pvt(ubx_payload, data);
+                }
+            }
+            ubx_state = UBX_STATE_SYNC1;
+            break;
+
+        default:
+            ubx_state = UBX_STATE_SYNC1;
+            break;
+    }
 }
 
 /* ── Public API ──────────────────────────────────────────────────────── */
 
 void GPS_Init(UART_HandleTypeDef *huart, GPS_Data_t *data) {
-    gps_huart = huart;
+    gps_huart    = huart;
     gps_dma_tail = 0;
+    ubx_state    = UBX_STATE_SYNC1;
 
     memset(gps_dma_buf, 0, sizeof(gps_dma_buf));
-    memset(data, 0, sizeof(GPS_Data_t));
+    memset(data,        0, sizeof(GPS_Data_t));
 
-    /*
-     * Start circular DMA receive. The DMA runs continuously and wraps
-     * automatically — GPS_Update() tracks the write head via NDTR.
-     */
     HAL_UART_Receive_DMA(huart, gps_dma_buf, GPS_DMA_BUF_SIZE);
 }
 
 void GPS_Update(GPS_Data_t *data) {
     if (gps_huart == NULL) return;
 
-    /*
-     * head = next byte DMA will write.
-     * NDTR counts down from GPS_DMA_BUF_SIZE to 0, so:
-     *   head = GPS_DMA_BUF_SIZE - NDTR
-     */
-    uint16_t head = GPS_DMA_BUF_SIZE - (uint16_t)__HAL_DMA_GET_COUNTER(gps_huart->hdmarx);
-
-    if (head == gps_dma_tail) return;   /* no new bytes */
-
-    static char line[GPS_NMEA_MAX_LEN];
-    static uint8_t line_pos = 0;
+    uint16_t head = GPS_DMA_BUF_SIZE -
+                    (uint16_t)__HAL_DMA_GET_COUNTER(gps_huart->hdmarx);
 
     while (gps_dma_tail != head) {
-        uint8_t c = gps_dma_buf[gps_dma_tail];
-        gps_dma_tail = (gps_dma_tail + 1u) % GPS_DMA_BUF_SIZE;
-
-        if (c == '$') {
-            line_pos = 0;
-            line[line_pos++] = (char)c;
-        } else if (c == '\n') {
-            if (line_pos > 0 && line_pos < GPS_NMEA_MAX_LEN) {
-                line[line_pos] = '\0';
-                nmea_dispatch(line, data);
-            }
-            line_pos = 0;
-        } else if (c == '\r') {
-            /* skip - NMEA line endings are \r\n */
-        } else {
-            if (line_pos < (GPS_NMEA_MAX_LEN - 1u)) {
-                line[line_pos++] = (char)c;
-            } else {
-                line_pos = 0;   /* overflow - discard sentence */
-            }
-        }
+        ubx_feed_byte(gps_dma_buf[gps_dma_tail], data);
+        gps_dma_tail = (gps_dma_tail + 1U) % GPS_DMA_BUF_SIZE;
     }
 }
