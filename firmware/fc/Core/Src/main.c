@@ -24,6 +24,7 @@
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
+#include "fatfs.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -34,6 +35,7 @@
 #include "imu_fusion.h"
 #include "mag.h"
 #include "rc.h"
+#include "sd.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -280,6 +282,7 @@ int main(void)
   MX_USART2_UART_Init();
   MX_TIM6_Init();
   MX_USART3_UART_Init();
+  MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
 
     char msg[128];
@@ -386,6 +389,22 @@ int main(void)
 
     UART_Print("[IMU] starting 100Hz loop\r\n");
 
+    /* ── SD card blackbox logger init ───────────────────────────────────── */
+    SD_Log_Result_t sd_log_result = SD_Log_Init();
+    UART_Print(SD_Log_StatusStr());
+    UART_Print("\r\n");
+    if (sd_log_result != SD_LOG_OK) {
+        UART_Print("[SD] WARNING: logging disabled\r\n");
+    }
+
+    /* SD init disturbs SPI1 — reinitialize BMI323 to restore its config */
+    if (BMI323_Init() == 0) {
+        UART_Print("[IMU] post-SD reinit OK\r\n");
+    } else {
+        UART_Print("[IMU] post-SD reinit FAILED\r\n");
+        Error_Handler();
+    }
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -491,6 +510,29 @@ int main(void)
                      "[DIAG] send=%lu tc=%lu\r\n",
                      dshot_send_count, dshot_tc_count);
             UART_Print(msg);
+
+            /* ── SD flush once per second ───────────────────────────────── */
+            SD_Log_Flush();
+        }
+
+        /* ── SD log write — every 10 loops = 10 Hz ──────────────────────── */
+        if (loop_count % 10 == 0) {
+            SD_Log_Write(
+                HAL_GetTick(),
+                roll_corr, pitch_corr, imu_fusion.yaw,
+                imu_acc_x, imu_acc_y, imu_acc_z,
+                imu_gyr_x, imu_gyr_y, imu_gyr_z,
+                rc_pkt.throttle,
+                dshot_m1, dshot_m2, dshot_m3, dshot_m4,
+                rc_pkt.armed,
+                RC_IsHealthy(),
+                gps_data.fix_valid,
+                gps_data.satellites,
+                gps_data.latitude,
+                gps_data.longitude,
+                gps_data.altitude_ft,
+                gps_data.speed_mph
+            );
         }
 
         ++loop_count;

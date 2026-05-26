@@ -50,6 +50,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/mag.c
     Core/Src/rc.c
     Core/Src/gps.c
+    Core/Src/sd.c
 )
 
 # Add include paths
