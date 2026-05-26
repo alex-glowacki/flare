@@ -103,6 +103,11 @@ volatile int16_t imu_gyr_x = 0;
 volatile int16_t imu_gyr_y = 0;
 volatile int16_t imu_gyr_z = 0;
 
+/* Last known-good accel samples — used to replace all-zero dropout reads */
+static int16_t last_acc_x = 0;
+static int16_t last_acc_y = 0;
+static int16_t last_acc_z = 0;
+
 IMU_Fusion_t imu_fusion;
 
 MAG_Cal_t mag_cal;  /* hard-iron offsets — zero until calibrated */
@@ -415,8 +420,28 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
+        uint32_t tick_start = HAL_GetTick();
+
+        /* Flush SPI1 RX FIFO before every IMU read — prevents residual bytes
+         * from prior SD transactions corrupting the first BMI323 burst read. */
+        SPI1_FlushRxFifo();
+
         BMI323_ReadAccel();
         BMI323_ReadGyro();
+
+        /* Dropout guard — all-zero accel is physically impossible in normal
+         * operation and indicates a corrupted SPI read caused by SD bus
+         * contention. Replace with last known-good sample so the fusion
+         * filter receives a continuous valid signal. */
+        if (imu_acc_x == 0 && imu_acc_y == 0 && imu_acc_z == 0) {
+            imu_acc_x = last_acc_x;
+            imu_acc_y = last_acc_y;
+            imu_acc_z = last_acc_z;
+        } else {
+            last_acc_x = imu_acc_x;
+            last_acc_y = imu_acc_y;
+            last_acc_z = imu_acc_z;
+        }
 
         float new_heading;
         if (mag_ok && MAG_ReadHeading(&hi2c1, &mag_cal, &new_heading) == MAG_OK) {
@@ -510,13 +535,21 @@ int main(void)
                      "[DIAG] send=%lu tc=%lu\r\n",
                      dshot_send_count, dshot_tc_count);
             UART_Print(msg);
-
-            /* ── SD flush once per second ───────────────────────────────── */
-            SD_Log_Flush();
         }
 
-        /* ── SD log write — every 10 loops = 10 Hz ──────────────────────── */
-        if (loop_count % 10 == 0) {
+        ++loop_count;
+
+        /* Deadline-based delay — sleep only the remaining time in this 10ms
+         * tick. Prevents long operations from pushing the next IMU read late. */
+        uint32_t elapsed = HAL_GetTick() - tick_start;
+        if (elapsed < IMU_LOOP_INTERVAL_MS) {
+            HAL_Delay(IMU_LOOP_INTERVAL_MS - elapsed);
+        }
+
+        /* ── SD operations AFTER delay — maximally far from next IMU read ──
+         * SPI1_FlushRxFifo() after each call ensures the bus is clean before
+         * the next tick's BMI323_ReadAccel(). */
+        if (loop_count % 20 == 0) {
             SD_Log_Write(
                 HAL_GetTick(),
                 roll_corr, pitch_corr, imu_fusion.yaw,
@@ -533,10 +566,13 @@ int main(void)
                 gps_data.altitude_ft,
                 gps_data.speed_mph
             );
+            SPI1_FlushRxFifo();
         }
 
-        ++loop_count;
-        HAL_Delay(IMU_LOOP_INTERVAL_MS);
+        if (loop_count % 100 == 1) {
+            SD_Log_Flush();
+            SPI1_FlushRxFifo();
+        }
 
     /* USER CODE END 3 */
     }   /* end while(1) */
@@ -551,19 +587,10 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Supply configuration update enable
-  */
   HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
-
-  /** Configure the main internal regulator output voltage
-  */
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
-
   while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
   RCC_OscInitStruct.HSICalibrationValue = 64;
@@ -582,8 +609,6 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
                               |RCC_CLOCKTYPE_D3PCLK1|RCC_CLOCKTYPE_D1PCLK1;
@@ -612,10 +637,6 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 /* USER CODE END 4 */
 
-/**
-  * @brief  MPU Configuration
-  * @retval None
-  */
 static void MPU_Config(void)
 {
     MPU_Region_InitTypeDef MPU_InitStruct = {0};
@@ -645,10 +666,6 @@ static void MPU_Config(void)
     HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 }
 
-/**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
@@ -658,13 +675,6 @@ void Error_Handler(void)
 }
 
 #ifdef USE_FULL_ASSERT
-/**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */

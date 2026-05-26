@@ -1,34 +1,31 @@
 /* firmware/fc/Core/Src/mag.c */
 #include "mag.h"
+#include "stm32h7xx_hal_def.h"
+#include "stm32h7xx_hal_i2c.h"
 #include <math.h>
+#include <stdint.h>
 
 /* ── Internal helpers ───────────────────────────────────────────────────── */
 
-static uint8_t MAG_WriteReg(I2C_HandleTypeDef *hi2c, uint8_t reg, uint8_t val)
-{
-    HAL_StatusTypeDef s = HAL_I2C_Mem_Write(hi2c, QMC5883P_ADDR, reg,
-                                            I2C_MEMADD_SIZE_8BIT, &val, 1, 10);
+static uint8_t MAG_WriteReg(I2C_HandleTypeDef *hi2c, uint8_t reg, uint8_t val) {
+    HAL_StatusTypeDef s = HAL_I2C_Mem_Write(hi2c, QMC5883P_ADDR, reg, I2C_MEMADD_SIZE_8BIT, &val, 1, 2);
     return (s == HAL_OK) ? MAG_OK : MAG_ERR_I2C;
 }
 
-static uint8_t MAG_ReadRegs(I2C_HandleTypeDef *hi2c, uint8_t reg,
-                             uint8_t *buf, uint8_t len)
-{
-    HAL_StatusTypeDef s = HAL_I2C_Mem_Read(hi2c, QMC5883P_ADDR, reg,
-                                           I2C_MEMADD_SIZE_8BIT, buf, len, 10);
+static uint8_t MAG_ReadRegs(I2C_HandleTypeDef *hi2c, uint8_t reg, uint8_t *buf, uint8_t len) {
+    HAL_StatusTypeDef s = HAL_I2C_Mem_Read(hi2c, QMC5883P_ADDR, reg, I2C_MEMADD_SIZE_8BIT, buf, len, 2);
     return (s == HAL_OK) ? MAG_OK : MAG_ERR_I2C;
 }
 
 /* ── Public API ─────────────────────────────────────────────────────────── */
 
-uint8_t MAG_Init(I2C_HandleTypeDef *hi2c, uint8_t *chip_id)
-{
-    uint8_t id  = 0;
+uint8_t MAG_Init(I2C_HandleTypeDef *hi2c, uint8_t *chip_id) {
+    uint8_t id = 0;
     uint8_t ret;
 
     /*
-     * QMC5883P chip ID is at register 0x00 and returns 0x80.
-     * (QMC5883L used 0x0D → 0xFF — completely different.)
+     * QMC5883P chip ID is at register 0x00 and return 0x80.
+     * (QMC5883L used 0x0D → 0xFF - completely different.)
      */
     ret = MAG_ReadRegs(hi2c, QMC5883P_REG_CHIP_ID, &id, 1);
     if (ret != MAG_OK)
@@ -54,28 +51,24 @@ uint8_t MAG_Init(I2C_HandleTypeDef *hi2c, uint8_t *chip_id)
     return MAG_OK;
 }
 
-uint8_t MAG_ReadRaw(I2C_HandleTypeDef *hi2c, int16_t *x, int16_t *y,
-                    int16_t *z)
-{
+uint8_t MAG_ReadRaw(I2C_HandleTypeDef *hi2c, int16_t *x, int16_t *y, int16_t *z) {
     uint8_t ret;
     uint8_t status = 0;
 
     /*
-     * Poll DRDY (STATUS register 0x09, bit 0).
-     * At 100 Hz, new data arrives every 10ms. 20 × 1ms = 20ms max wait.
+     * Non-blocking DRDY check — read STATUS once and return immediately
+     * if data is not ready. The 100Hz IMU loop calls this every 10ms;
+     * the mag ODR is also 100Hz so data will be ready on the next tick.
+     * Never block here — HAL_Delay() in the main loop kills IMU cycles.
      *
      * Note: QMC5883P STATUS is at 0x09 — NOT 0x06 as on QMC5883L.
      */
-    for (int i = 0; i < 20; i++) {
-        ret = MAG_ReadRegs(hi2c, QMC5883P_REG_STATUS, &status, 1);
-        if (ret != MAG_OK)
-            return MAG_ERR_I2C;
-        if (status & QMC5883P_STATUS_DRDY)
-            break;
-        HAL_Delay(1);
-        if (i == 19)
-            return MAG_ERR_NOT_READY;
-    }
+    ret = MAG_ReadRegs(hi2c, QMC5883P_REG_STATUS, &status, 1);
+    if (ret != MAG_OK)
+        return MAG_ERR_I2C;
+
+    if (!(status & QMC5883P_STATUS_DRDY))
+        return MAG_ERR_NOT_READY;
 
     /*
      * Burst-read 6 bytes starting at XOUT_L (0x01).
@@ -95,9 +88,7 @@ uint8_t MAG_ReadRaw(I2C_HandleTypeDef *hi2c, int16_t *x, int16_t *y,
     return MAG_OK;
 }
 
-uint8_t MAG_ReadHeading(I2C_HandleTypeDef *hi2c, const MAG_Cal_t *cal,
-                        float *heading)
-{
+uint8_t MAG_ReadHeading(I2C_HandleTypeDef *hi2c, const MAG_Cal_t *cal, float *heading) {
     int16_t rx, ry, rz;
     uint8_t ret = MAG_ReadRaw(hi2c, &rx, &ry, &rz);
     if (ret != MAG_OK)
@@ -119,8 +110,7 @@ uint8_t MAG_ReadHeading(I2C_HandleTypeDef *hi2c, const MAG_Cal_t *cal,
     return MAG_OK;
 }
 
-void MAG_SetCalibration(MAG_Cal_t *cal, float offset_x, float offset_y)
-{
+void MAG_SetCalibration(MAG_Cal_t *cal, float offset_x, float offset_y) {
     cal->offset_x = offset_x;
     cal->offset_y = offset_y;
 }
