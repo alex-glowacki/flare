@@ -7,7 +7,6 @@
 /* USER CODE END Header */
 
 #include "stm32h7xx_hal.h"
-#include <stdio.h>
 #ifdef USE_OBSOLETE_USER_CODE_SECTION_0
 /* USER CODE BEGIN 0 */
 /* USER CODE END 0 */
@@ -20,8 +19,6 @@
 #include "ff_gen_drv.h"
 #include "main.h"
 #include "spi.h"
-#include "usart.h"
-#define SD_DBG(s) HAL_UART_Transmit(&huart1, (const uint8_t *)(s), strlen(s), HAL_MAX_DELAY)
 
 /* Private define ------------------------------------------------------------*/
 
@@ -30,16 +27,16 @@
 #define SD_DUMMY_BYTE       0xFFu
 
 /* SD command tokens */
-#define SD_CMD0             0u
-#define SD_CMD1             1u
-#define SD_CMD8             8u
-#define SD_CMD9             9u
-#define SD_CMD16            16u
-#define SD_CMD17            17u
-#define SD_CMD24            24u
-#define SD_CMD41            41u
-#define SD_CMD55            55u
-#define SD_CMD58            58u
+#define SD_CMD0             0u   /* GO_IDLE_STATE        */
+#define SD_CMD1             1u   /* SEND_OP_COND (MMC)   */
+#define SD_CMD8             8u   /* SEND_IF_COND         */
+#define SD_CMD9             9u   /* SEND_CSD             */
+#define SD_CMD16            16u  /* SET_BLOCKLEN         */
+#define SD_CMD17            17u  /* READ_SINGLE_BLOCK    */
+#define SD_CMD24            24u  /* WRITE_BLOCK          */
+#define SD_CMD41            41u  /* APP_SEND_OP_COND     */
+#define SD_CMD55            55u  /* APP_CMD              */
+#define SD_CMD58            58u  /* READ_OCR             */
 
 /* R1 response bits */
 #define SD_R1_IDLE          0x01u
@@ -52,12 +49,12 @@
 
 /* Card type flags */
 #define SD_CT_UNKNOWN       0x00u
-#define SD_CT_SD1           0x01u
-#define SD_CT_SD2           0x02u
-#define SD_CT_SDHC          0x04u
+#define SD_CT_SD1           0x01u  /* SD v1                */
+#define SD_CT_SD2           0x02u  /* SD v2                */
+#define SD_CT_SDHC          0x04u  /* SDHC / SDXC          */
 
 /* Private variables ---------------------------------------------------------*/
-static volatile DSTATUS sd_stat = STA_NOINIT;
+static volatile DSTATUS sd_stat    = STA_NOINIT;
 static uint8_t          sd_card_type = SD_CT_UNKNOWN;
 
 /* USER CODE END DECL */
@@ -97,16 +94,29 @@ static inline void SD_CS_High(void)
     HAL_GPIO_WritePin(SD_CS_GPIO_Port, SD_CS_Pin, GPIO_PIN_SET);
 }
 
+/*
+ * Deselect card, flush the SPI RX FIFO, then clock out one dummy byte.
+ *
+ * The FIFO flush is required because HAL_SPI_Transmit (used for the 512-byte
+ * write payload) does not drain the RX FIFO — residual bytes left there will
+ * corrupt the first BMI323 read that follows on the shared SPI1 bus, causing
+ * the single-sample zero dropout seen without this flush.
+ */
 static void SD_Deselect(void)
 {
     SD_CS_High();
-    /* Flush RX FIFO — prevents residual bytes corrupting next BMI323 read */
+
+    /* Flush RX FIFO by toggling SPE — safe on STM32H7 when no transfer
+     * is in progress (CS is already high, card is deselected). */
     __HAL_SPI_DISABLE(&hspi1);
     __HAL_SPI_ENABLE(&hspi1);
+
+    /* One trailing dummy byte to release MISO */
     uint8_t dummy = SD_DUMMY_BYTE;
     HAL_SPI_Transmit(&hspi1, &dummy, 1, HAL_MAX_DELAY);
 }
 
+/* Send one byte, return received byte. */
 static uint8_t SD_SPI_Byte(uint8_t tx)
 {
     uint8_t rx = 0;
@@ -114,6 +124,7 @@ static uint8_t SD_SPI_Byte(uint8_t tx)
     return rx;
 }
 
+/* Wait for card to release MISO (0xFF = ready). Returns 1 on success. */
 static uint8_t SD_WaitReady(void)
 {
     uint32_t t = HAL_GetTick();
@@ -123,10 +134,12 @@ static uint8_t SD_WaitReady(void)
     return 1;
 }
 
-
-
 /* ── SD command layer ────────────────────────────────────────────────────── */
 
+/*
+ * Send SD command and return R1 response byte.
+ * Card must be selected (CS low) before calling.
+ */
 static uint8_t SD_SendCmd(uint8_t cmd, uint32_t arg)
 {
     if (!SD_WaitReady()) return 0xFF;
@@ -137,13 +150,14 @@ static uint8_t SD_SendCmd(uint8_t cmd, uint32_t arg)
         (uint8_t)(arg >> 16),
         (uint8_t)(arg >>  8),
         (uint8_t)(arg),
-        0x01u,
+        0x01u,   /* CRC stub — valid for CMD0 and CMD8, ignored otherwise */
     };
     if (cmd == SD_CMD0) buf[5] = 0x95u;
     if (cmd == SD_CMD8) buf[5] = 0x87u;
 
     HAL_SPI_Transmit(&hspi1, buf, 6, HAL_MAX_DELAY);
 
+    /* R1 response: poll up to 10 bytes */
     uint8_t r1 = 0xFF;
     for (uint8_t i = 0; i < 10; i++) {
         r1 = SD_SPI_Byte(SD_DUMMY_BYTE);
@@ -152,8 +166,11 @@ static uint8_t SD_SendCmd(uint8_t cmd, uint32_t arg)
     return r1;
 }
 
+/* ── Receive a data block from the card ─────────────────────────────────── */
+
 static uint8_t SD_RxDataBlock(uint8_t *buf, UINT len)
 {
+    /* Wait for data token 0xFE */
     uint32_t t = HAL_GetTick();
     uint8_t token;
     do {
@@ -163,13 +180,17 @@ static uint8_t SD_RxDataBlock(uint8_t *buf, UINT len)
 
     if (token != SD_TOKEN_START) return 0;
 
+    /* Receive payload */
     memset(buf, SD_DUMMY_BYTE, len);
     HAL_SPI_TransmitReceive(&hspi1, buf, buf, len, HAL_MAX_DELAY);
 
+    /* Discard two CRC bytes */
     SD_SPI_Byte(SD_DUMMY_BYTE);
     SD_SPI_Byte(SD_DUMMY_BYTE);
     return 1;
 }
+
+/* ── Transmit a data block to the card ──────────────────────────────────── */
 
 static uint8_t SD_TxDataBlock(const uint8_t *buf, uint8_t token)
 {
@@ -178,9 +199,14 @@ static uint8_t SD_TxDataBlock(const uint8_t *buf, uint8_t token)
     SD_SPI_Byte(token);
 
     if (token == SD_TOKEN_START) {
+        /* Write payload — cast away const; HAL Tx does not modify buffer */
         HAL_SPI_Transmit(&hspi1, (uint8_t *)buf, 512, HAL_MAX_DELAY);
+
+        /* Dummy CRC */
         SD_SPI_Byte(SD_DUMMY_BYTE);
         SD_SPI_Byte(SD_DUMMY_BYTE);
+
+        /* Data response — lower 5 bits: 0x05 = accepted */
         uint8_t resp = SD_SPI_Byte(SD_DUMMY_BYTE) & 0x1Fu;
         if (resp != 0x05u) return 0;
     }
@@ -189,6 +215,9 @@ static uint8_t SD_TxDataBlock(const uint8_t *buf, uint8_t token)
 
 /* ── FatFS interface ─────────────────────────────────────────────────────── */
 
+/**
+  * @brief  Initialises the SD card over SPI.
+  */
 DSTATUS USER_initialize(BYTE pdrv)
 {
     if (pdrv != 0) return STA_NOINIT;
@@ -196,17 +225,15 @@ DSTATUS USER_initialize(BYTE pdrv)
     sd_stat      = STA_NOINIT;
     sd_card_type = SD_CT_UNKNOWN;
 
-    char dbg[48];
-
-    SD_DBG("[SD] init start\r\n");
-
+    /* Keep BMI323 deselected for the entire SD init sequence */
     HAL_GPIO_WritePin(IMU_CS_GPIO_Port, IMU_CS_Pin, GPIO_PIN_SET);
     SD_CS_High();
     HAL_Delay(100);
 
+    /* Send ≥74 dummy clocks with CS high to wake card */
     for (uint8_t i = 0; i < 10; i++) SD_SPI_Byte(SD_DUMMY_BYTE);
-    SD_DBG("[SD] dummy clocks done\r\n");
 
+    /* CMD0 — reset to SPI mode, retry up to 10 times */
     uint8_t r1 = 0xFF;
     for (uint8_t retry = 0; retry < 10; retry++) {
         SD_CS_Low();
@@ -215,26 +242,20 @@ DSTATUS USER_initialize(BYTE pdrv)
         if (r1 == SD_R1_IDLE) break;
         HAL_Delay(10);
     }
-    snprintf(dbg, sizeof(dbg), "[SD] CMD0 r1=0x%02X\r\n", r1);
-    SD_DBG(dbg);
     if (r1 != SD_R1_IDLE) return sd_stat;
 
-    SD_DBG("[SD] CMD8 start\r\n");
+    /* CMD8 — probe for SD v2 (arg: VHS=1 / check pattern 0xAA) */
     SD_CS_Low();
     r1 = SD_SendCmd(SD_CMD8, 0x000001AAu);
-    snprintf(dbg, sizeof(dbg), "[SD] CMD8 r1=0x%02X\r\n", r1);
-    SD_DBG(dbg);
 
     if (r1 == SD_R1_IDLE) {
+        /* SD v2: read 32-bit R7 response */
         uint8_t r7[4];
         for (uint8_t i = 0; i < 4; i++) r7[i] = SD_SPI_Byte(SD_DUMMY_BYTE);
         SD_Deselect();
-        snprintf(dbg, sizeof(dbg), "[SD] R7=%02X %02X %02X %02X\r\n",
-                 r7[0], r7[1], r7[2], r7[3]);
-        SD_DBG(dbg);
 
         if (r7[2] == 0x01u && r7[3] == 0xAAu) {
-            SD_DBG("[SD] ACMD41 loop start\r\n");
+            /* Valid voltage/echo — init with ACMD41(HCS=1) */
             uint32_t t = HAL_GetTick();
             do {
                 SD_CS_Low();
@@ -243,29 +264,23 @@ DSTATUS USER_initialize(BYTE pdrv)
                 SD_CS_Low();
                 r1 = SD_SendCmd(SD_CMD41, 0x40000000u);
                 SD_Deselect();
-                if ((HAL_GetTick() - t) > SD_TIMEOUT_MS) {
-                    SD_DBG("[SD] ACMD41 timeout\r\n");
-                    return sd_stat;
-                }
+                if ((HAL_GetTick() - t) > SD_TIMEOUT_MS) return sd_stat;
             } while (r1 != SD_R1_READY);
-            SD_DBG("[SD] ACMD41 done\r\n");
 
+            /* CMD58 — read OCR to check CCS bit (SDHC vs SDSC) */
             SD_CS_Low();
             r1 = SD_SendCmd(SD_CMD58, 0);
             uint8_t ocr[4];
             for (uint8_t i = 0; i < 4; i++) ocr[i] = SD_SPI_Byte(SD_DUMMY_BYTE);
             SD_Deselect();
-            snprintf(dbg, sizeof(dbg), "[SD] OCR=%02X %02X %02X %02X\r\n",
-                     ocr[0], ocr[1], ocr[2], ocr[3]);
-            SD_DBG(dbg);
 
             sd_card_type = (r1 == SD_R1_READY)
                 ? ((ocr[0] & 0x40u) ? SD_CT_SDHC : SD_CT_SD2)
                 : SD_CT_UNKNOWN;
         }
     } else {
+        /* SD v1 or MMC — try ACMD41 then CMD1 */
         SD_Deselect();
-        SD_DBG("[SD] SD v1 path\r\n");
         uint32_t t = HAL_GetTick();
         do {
             SD_CS_Low();
@@ -274,13 +289,12 @@ DSTATUS USER_initialize(BYTE pdrv)
             SD_CS_Low();
             r1 = SD_SendCmd(SD_CMD41, 0);
             SD_Deselect();
-            if ((HAL_GetTick() - t) > SD_TIMEOUT_MS) {
-                SD_DBG("[SD] v1 ACMD41 timeout\r\n");
-                return sd_stat;
-            }
+            if ((HAL_GetTick() - t) > SD_TIMEOUT_MS) return sd_stat;
         } while (r1 != SD_R1_READY);
 
         sd_card_type = (r1 == SD_R1_READY) ? SD_CT_SD1 : SD_CT_UNKNOWN;
+
+        /* Set block length to 512 for SD v1 */
         if (sd_card_type == SD_CT_SD1) {
             SD_CS_Low();
             SD_SendCmd(SD_CMD16, 512);
@@ -288,53 +302,48 @@ DSTATUS USER_initialize(BYTE pdrv)
         }
     }
 
-    snprintf(dbg, sizeof(dbg), "[SD] card_type=0x%02X\r\n", sd_card_type);
-    SD_DBG(dbg);
-
     if (sd_card_type == SD_CT_UNKNOWN) return sd_stat;
 
-    sd_stat = 0;
-    SD_DBG("[SD] init OK\r\n");
+    sd_stat = 0;   /* Clear STA_NOINIT — card ready */
     return sd_stat;
 }
 
+/**
+  * @brief  Returns disk status.
+  */
 DSTATUS USER_status(BYTE pdrv)
 {
     if (pdrv != 0) return STA_NOINIT;
     return sd_stat;
 }
 
+/**
+  * @brief  Reads one 512-byte sector.
+  */
 DRESULT USER_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count)
 {
-    char dbg[48];
-    snprintf(dbg, sizeof(dbg), "[SD] READ sec=%lu cnt=%u\r\n",
-             (unsigned long)sector, (unsigned)count);
-    SD_DBG(dbg);
-
     if (pdrv != 0 || sd_stat & STA_NOINIT) return RES_NOTRDY;
     if (!count) return RES_PARERR;
 
+    /* SDHC/SDXC: sector address. SDSC: byte address. */
     if (!(sd_card_type & SD_CT_SDHC)) sector <<= 9;
 
     if (count == 1) {
         SD_CS_Low();
         uint8_t r1 = SD_SendCmd(SD_CMD17, sector);
-        snprintf(dbg, sizeof(dbg), "[SD] CMD17 r1=0x%02X\r\n", r1);
-        SD_DBG(dbg);
         DRESULT res = RES_ERROR;
-        if (r1 == SD_R1_READY && SD_RxDataBlock(buff, 512)) {
-            res = RES_OK;
-            SD_DBG("[SD] read OK\r\n");
-        } else {
-            SD_DBG("[SD] read FAIL\r\n");
-        }
+        if (r1 == SD_R1_READY && SD_RxDataBlock(buff, 512)) res = RES_OK;
         SD_Deselect();
         return res;
     }
 
+    /* Multi-block read not needed for logger — single block only */
     return RES_ERROR;
 }
 
+/**
+  * @brief  Writes one 512-byte sector.
+  */
 #if _USE_WRITE == 1
 DRESULT USER_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
 {
@@ -356,6 +365,9 @@ DRESULT USER_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
 }
 #endif /* _USE_WRITE == 1 */
 
+/**
+  * @brief  I/O control — FatFS calls this for flush and geometry queries.
+  */
 #if _USE_IOCTL == 1
 DRESULT USER_ioctl(BYTE pdrv, BYTE cmd, void *buff)
 {
@@ -365,23 +377,27 @@ DRESULT USER_ioctl(BYTE pdrv, BYTE cmd, void *buff)
 
     switch (cmd) {
         case CTRL_SYNC:
+            /* Ensure card has finished writing */
             SD_CS_Low();
             if (SD_WaitReady()) res = RES_OK;
             SD_Deselect();
             break;
 
         case GET_SECTOR_COUNT: {
+            /* Read CSD register to get card capacity */
             SD_CS_Low();
             uint8_t r1 = SD_SendCmd(SD_CMD9, 0);
             uint8_t csd[16] = {0};
             if (r1 == SD_R1_READY && SD_RxDataBlock(csd, 16)) {
                 DWORD sectors = 0;
                 if ((csd[0] >> 6) == 1) {
+                    /* CSD v2 (SDHC/SDXC) */
                     uint32_t c_size = ((uint32_t)(csd[7] & 0x3Fu) << 16)
                                     | ((uint32_t) csd[8]          <<  8)
                                     |             csd[9];
                     sectors = (c_size + 1) << 10;
                 } else {
+                    /* CSD v1 (SDSC) */
                     uint8_t  n      = (csd[5] & 0x0Fu)
                                     + ((csd[10] >> 7) | ((csd[9] & 0x03u) << 1))
                                     + 2u;
