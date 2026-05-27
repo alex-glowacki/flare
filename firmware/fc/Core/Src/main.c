@@ -28,6 +28,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "math.h"
 #include "dshot.h"
 #include "flare.h"
 #include "flare_protocol.h"
@@ -341,8 +342,8 @@ int main(void)
     IMU_Fusion_Init(&imu_fusion);
     UART_Print("[FUSION] complementary filter ready\r\n");
 
-    mag_cal.offset_x = 0.0f;
-    mag_cal.offset_y = 0.0f;
+    mag_cal.offset_x = -251.0f;
+    mag_cal.offset_y = 41.5f;
     uint8_t mag_chip_id = 0;
     uint8_t mag_result = MAG_Init(&hi2c1, &mag_chip_id);
     uint8_t mag_ok = (mag_result != MAG_ERR_I2C);
@@ -443,9 +444,15 @@ int main(void)
             last_acc_z = imu_acc_z;
         }
 
-        float new_heading;
-        if (mag_ok && MAG_ReadHeading(&hi2c1, &mag_cal, &new_heading) == MAG_OK) {
-            mag_heading = new_heading;
+        if (mag_ok) {
+            int16_t mag_rx, mag_ry, mag_rz;
+            if (MAG_ReadRaw(&hi2c1, &mag_rx, &mag_ry, &mag_rz) == MAG_OK) {
+                float cx = (float)mag_rx - mag_cal.offset_x;
+                float cy = (float)mag_ry - mag_cal.offset_y;
+                float h = atan2f(cy, cx) * (180.0f / (float)M_PI);
+                if (h < 0.0f) h += 360.0f;
+                mag_heading = h;
+            }
         }
 
         IMU_Fusion_Update(&imu_fusion,

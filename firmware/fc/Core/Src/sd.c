@@ -9,6 +9,15 @@
  *   - Each SD_Log_Flush(): call f_sync() to commit buffered data to the card.
  *     At 1 Hz this gives ~1s data loss on power cut — acceptable for a logger.
  *   - SD_Log_Close(): f_sync() + f_close() + f_unmount().
+ *
+ * Float encoding (f_printf has no %f support in this build):
+ *   roll_x100  = roll  * 100  → divide by 100.0 to recover degrees
+ *   pitch_x100 = pitch * 100  → divide by 100.0 to recover degrees
+ *   yaw_x100   = yaw   * 100  → divide by 100.0 to recover degrees
+ *   lat_x1e6   = lat   * 1e6  → divide by 1e6   to recover decimal degrees
+ *   lon_x1e6   = lon   * 1e6  → divide by 1e6   to recover decimal degrees
+ *   alt_x10    = alt   * 10   → divide by 10.0  to recover feet
+ *   spd_x10    = spd   * 10   → divide by 10.0  to recover mph
  */
 
 #include "usart.h"
@@ -27,15 +36,16 @@ static uint8_t sd_initialised = 0;
 static char    sd_filename[16];        /* "LOGxxx.CSV\0"   */
 static char    sd_status_str[48];      /* for StatusStr()  */
 
-/* CSV header — must match column order in SD_Log_Write() */
+/* CSV header — must match column order in SD_Log_Write().
+ * Floats are integer-scaled — see encoding notes at top of file. */
 static const char SD_CSV_HEADER[] =
     "time_ms,"
-    "roll,pitch,yaw,"
+    "roll_x100,pitch_x100,yaw_x100,"
     "acc_x,acc_y,acc_z,"
     "gyr_x,gyr_y,gyr_z,"
     "throttle,m1,m2,m3,m4,"
     "armed,rc_ok,"
-    "gps_fix,gps_sats,lat,lon,alt_ft,spd_mph"
+    "gps_fix,gps_sats,lat_x1e6,lon_x1e6,alt_x10,spd_x10"
     "\n";
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
@@ -136,18 +146,26 @@ SD_Log_Result_t SD_Log_Write(
 {
     if (!sd_initialised) return SD_LOG_NOT_INIT;
 
-    /* Format one CSV row — f_printf is enabled via _USE_STRFUNC=2 in ffconf.h */
+    /* Scale floats to integers — f_printf has no %f support in this build. */
+    int32_t roll_x100  = (int32_t)(roll  * 100.0f);
+    int32_t pitch_x100 = (int32_t)(pitch * 100.0f);
+    int32_t yaw_x100   = (int32_t)(yaw   * 100.0f);
+    int32_t lat_x1e6   = (int32_t)(latitude    * 1000000.0f);
+    int32_t lon_x1e6   = (int32_t)(longitude   * 1000000.0f);
+    int32_t alt_x10    = (int32_t)(altitude_ft  * 10.0f);
+    int32_t spd_x10    = (int32_t)(speed_mph    * 10.0f);
+
     int n = f_printf(&sd_file,
         "%lu,"
-        "%.2f,%.2f,%.2f,"
+        "%ld,%ld,%ld,"
         "%d,%d,%d,"
         "%d,%d,%d,"
         "%u,%u,%u,%u,%u,"
         "%u,%u,"
-        "%u,%u,%.6f,%.6f,%.1f,%.1f"
+        "%u,%u,%ld,%ld,%ld,%ld"
         "\n",
         (unsigned long)timestamp_ms,
-        (double)roll, (double)pitch, (double)yaw,
+        (long)roll_x100, (long)pitch_x100, (long)yaw_x100,
         (int)acc_x, (int)acc_y, (int)acc_z,
         (int)gyr_x, (int)gyr_y, (int)gyr_z,
         (unsigned)throttle,
@@ -155,8 +173,8 @@ SD_Log_Result_t SD_Log_Write(
         (unsigned)motor3, (unsigned)motor4,
         (unsigned)armed, (unsigned)rc_healthy,
         (unsigned)gps_fix, (unsigned)gps_sats,
-        (double)latitude, (double)longitude,
-        (double)altitude_ft, (double)speed_mph);
+        (long)lat_x1e6, (long)lon_x1e6,
+        (long)alt_x10, (long)spd_x10);
 
     return (n > 0) ? SD_LOG_OK : SD_LOG_WRITE_ERR;
 }
