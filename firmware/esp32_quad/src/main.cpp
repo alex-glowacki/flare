@@ -90,6 +90,7 @@ void setup() {
                 STM32_UART_TX_PIN, STM32_UART_RX_PIN);
 
   WiFi.mode(WIFI_STA);
+  Serial.println(WiFi.macAddress());
   WiFi.disconnect();
   Serial.printf("[QUAD] step 3 - WiFi ok MAC=%s\n", WiFi.macAddress().c_str());
 
