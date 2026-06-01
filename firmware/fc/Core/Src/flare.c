@@ -37,13 +37,16 @@ void FLARE_Init(void) {
     dshot_m4 = 0;
 
     /*
-     * Initial PID gains — these WILL need tuning on the bench before flight.
-     * Start conservative: low P, no I, small D.
+     * PID gains — Session 20 starting point.
+     * P reduced from 1.5 to 0.8 (gyro rates were hitting ±800 deg/s).
+     * D increased from 0.05 to 0.08 to improve damping.
+     * I remains zero until hover behaviour is validated.
+     * out_limit tightened to 150 to reduce motor saturation during corrections.
      * Args: kp, ki, kd, integral_limit, output_limit
      */
-    PID_Init(&pid_roll,  1.5f, 0.0f, 0.05f, 20.0f, 200.0f);
-    PID_Init(&pid_pitch, 1.5f, 0.0f, 0.05f, 20.0f, 200.0f);
-    PID_Init(&pid_yaw,   2.0f, 0.0f, 0.00f, 20.0f, 200.0f);
+    PID_Init(&pid_roll,  0.5f, 0.0f, 0.10f, 20.0f, 150.0f);
+    PID_Init(&pid_pitch, 0.5f, 0.0f, 0.10f, 20.0f, 150.0f);
+    PID_Init(&pid_yaw,   0.8f, 0.0f, 0.00f, 20.0f, 150.0f);
 }
 
 void FLARE_Update(float roll, float pitch, float gx, float gy, float gz, float dt) {
@@ -78,10 +81,10 @@ void FLARE_Update(float roll, float pitch, float gx, float gy, float gz, float d
     /*
      * X-frame motor mixing:
      *
-     *  M1 (Front-Left,  CCW) = throttle + roll - pitch - yaw
-     *  M2 (Front-Right, CW)  = throttle - roll - pitch + yaw
-     *  M3 (Rear-Right,  CCW) = throttle - roll + pitch - yaw
-     *  M4 (Rear-Left,   CW)  = throttle + roll + pitch + yaw
+     *  M1 (Front-Left,  CCW) = throttle - roll + pitch - yaw
+     *  M2 (Front-Right, CW)  = throttle + roll + pitch + yaw
+     *  M3 (Rear-Right,  CCW) = throttle + roll - pitch - yaw
+     *  M4 (Rear-Left,   CW)  = throttle - roll - pitch + yaw
      *
      * DSHOT value range: 48 (min throttle) to 2047 (max throttle).
      * Values below 48 are disarm/special commands — clamp to 48 minimum when armed.
