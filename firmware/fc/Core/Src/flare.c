@@ -88,10 +88,10 @@ void FLARE_Update(float roll, float pitch, float gx, float gy, float gz, float d
      */
     float t = (float)state.throttle;
 
-    float m1 = t + out_roll - out_pitch - out_yaw;
-    float m2 = t - out_roll - out_pitch + out_yaw;
-    float m3 = t - out_roll + out_pitch - out_yaw;
-    float m4 = t + out_roll + out_pitch + out_yaw;
+    float m1 = t - out_roll + out_pitch - out_yaw;
+    float m2 = t + out_roll + out_pitch + out_yaw;
+    float m3 = t + out_roll - out_pitch - out_yaw;
+    float m4 = t - out_roll - out_pitch + out_yaw;
 
     dshot_m1 = (uint16_t)clamp(m1, 48.0f, 2047.0f);
     dshot_m2 = (uint16_t)clamp(m2, 48.0f, 2047.0f);
