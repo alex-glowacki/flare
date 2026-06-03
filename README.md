@@ -13,14 +13,31 @@ systems learning project.
 |-------|---------------------------------------------------|--------|
 | 1     | STM32H7 bring-up — blink, UART, toolchain         | ✅ Done |
 | 2     | IMU bring-up — BMI323, sensor fusion              | ✅ Done |
-| 2.5   | Magnetometer — QMC5883P → QMC5883L transition     | ✅ Done |
+| 2.5   | Magnetometer — QMC5883P hard-iron calibration     | ✅ Done |
 | 3     | PID loop — stabilization, DSHOT motor output      | ✅ Done |
 | 4     | RC link — ESP-NOW, channel parsing, arming        | ✅ Done |
 | 4.5   | GPS — M100-5883 UBX binary parser, USART3 DMA     | ✅ Done |
+| 4.75  | SD card blackbox logger                           | ✅ Done |
 | 5     | Remote firmware — sticks, OLED, switches          | 🟡 In progress |
-| 5.5   | SD card blackbox logger                           | 🟡 Planned |
-| 6     | Flight testing & tuning                           | 🔲      |
+| 6     | Flight testing & PID tuning                       | 🟡 In progress |
 | 7     | *(Future)* LiDAR mapping — RPLiDAR + Pi companion | 🔲      |
+
+### Phase 6 — Flight Testing Detail
+
+| Item | Status |
+|---|---|
+| First outdoor hover flight | ✅ Done (LOG000/LOG001) |
+| IMU mounting offset calibration | ✅ Done — roll=+0.27°, pitch=−3.80°, bench-verified |
+| Mag hard-iron calibration | ✅ Done — offset_x=−251.0, offset_y=+41.5 |
+| SD blackbox logger operational | ✅ Done — LOG000–LOG008 captured |
+| Yaw kd tuning — damping spin | ✅ Done — kd=0.05 confirmed (LOG001) |
+| Yaw kp/output limit increase | ✅ Done — kp=1.2, out_limit=300 (LOG007) |
+| Prop/motor direction verification | ✅ Done — all confirmed correct |
+| Weak motor identification | ✅ Done — M1 (Front-Left, CCW) confirmed weaker than M3 via swap test |
+| M1 motor replacement | 🔲 Pending — Readytosky 2212 920KV CCW needed |
+| Software roll trim (interim) | 🔲 Pending — awaiting M1 swap back to original position |
+| Stable hands-off hover | 🔲 Pending |
+| ki_yaw = 0.01 | 🔲 Pending — after stable hover confirmed |
 
 ---
 
@@ -39,7 +56,7 @@ systems learning project.
 - USART2: PA2=TX, PA3=RX (ESP32 RC link)
 - USART3: PB10=TX, PB11=RX (GPS)
 - TIM4 DSHOT: PD12=M1, PD13=M2, PD14=M3, PD15=M4
-- SD CS: PC0 (planned — SPI1 shared with IMU)
+- SD CS: PC0 (SPI1 shared with IMU)
 - LED: PG7 (LED_USER)
 
 ### IMU — BMI323 (Arvian breakout, B0FG2ZFHNM)
@@ -56,39 +73,45 @@ systems learning project.
 
 ### GPS + Compass — HGLRC M100-5883
 
-Replaces both the GY-NEO6MV2 (NEO-6M) GPS and the GY-271 (QMC5883P) magnetometer.
-
 | M100-5883 Pin | FK723M1 Pin | Notes |
 |---------------|-------------|-------|
 | 5V            | PDB BEC 5V  | Do not use STM32 3.3V pin |
 | GND           | Common GND  | |
 | TX            | PB11 (USART3 RX) | GPS data → STM32 |
 | RX            | PB10 (USART3 TX) | Optional config commands |
-| SDA           | PB7 (I2C1 SDA)   | QMC5883L compass — deferred |
-| SCL           | PB6 (I2C1 SCL)   | QMC5883L compass — deferred |
+| SDA           | PB7 (I2C1 SDA)   | QMC5883P compass |
+| SCL           | PB6 (I2C1 SCL)   | QMC5883P compass |
 
 - GPS chip: u-blox M10 (10th gen), 72 channels, GPS/GLONASS/BDS/Galileo/QZSS
-- GPS protocol: UBX binary, NAV-PVT messages, 10Hz, 115200 baud
-- Compass chip: QMC5883L, I2C address `0x0D`
-- Compass SDA/SCL wiring deferred until GPS verified working outdoors
+- GPS protocol: UBX binary, NAV-PVT messages, 115200 baud, DMA ring buffer
+- GPS fix confirmed indoors (8 satellites)
+- Compass chip: QMC5883P, I2C address `0x2C`, chip ID `0x80`
+- Hard-iron offsets: `offset_x = -251.0f`, `offset_y = 41.5f` (calibrated)
+- Yaw stable at ~161–165° stationary
 
-### ESCs — Readytosky 35A BLHeli_S (×4)
+### ESCs — Readytosky 35A (×4)
 
-| Motor | Position    | Spin | Pin  |
-|-------|-------------|------|------|
-| M1    | Front-Left  | CCW  | PD12 |
-| M2    | Front-Right | CW   | PD13 |
-| M3    | Rear-Right  | CCW  | PD14 |
-| M4    | Rear-Left   | CW   | PD15 |
+| Motor | Position    | Spin | Cap color | Pin  |
+|-------|-------------|------|-----------|------|
+| M1    | Front-Left  | CCW  | Silver    | PD12 |
+| M2    | Front-Right | CW   | Black     | PD13 |
+| M3    | Rear-Right  | CCW  | Silver    | PD14 |
+| M4    | Rear-Left   | CW   | Black     | PD15 |
 
 - Firmware: Bluejay (replaces stock BLHeli_S)
 - Protocol: DSHOT300
+- Props: 1045R on CCW motors (M1/M3), 1045L on CW motors (M2/M4)
 - Demag Compensation: High (configured via BLHeliSuite + ATmega328P Nano)
 - Config backed up: `config/esc_blheli_setup.ini`
+
+> ⚠️ M1 (Front-Left, CCW, silver cap) is a known weak motor — produces less
+> thrust than M3 at equivalent DSHOT values. Confirmed via motor swap test
+> (LOG007/LOG008). Replacement Readytosky 2212 920KV CCW unit required.
 
 ### Power Distribution
 - QWinOut PDB with built-in 5V and 12V BECs
 - 3S LiPo with XT60
+- 4S upgrade planned post stable-flight (verify PDB BEC supports up to 16.8V first)
 
 ### RC Link
 - Nano ESP32 modules (ESP-NOW, quad-side and remote)
@@ -104,17 +127,21 @@ Replaces both the GY-NEO6MV2 (NEO-6M) GPS and the GY-271 (QMC5883P) magnetometer
 > ST-Link reset glitches can corrupt ESP32 flash mid-write, changing the
 > reported MAC address.
 
+### FAA Remote ID
+- Ruko R111S — hardware mount completed
+
+### SD Card Blackbox Logger
+- WWZMDiB micro-SD module, SPI1 shared with BMI323, CS=PC0
+- FatFS, 5Hz write / 1Hz flush
+- f_printf has no `%f` support — all floats scaled to integers permanently
+- Column names encode scale factor (e.g. `roll_x100`, `lat_x1e6`)
+- Last log: LOG008.CSV
+
 ### Remote Controller Hardware (Phase 5 — in progress)
 - **Gimbals:** FrSky M7 Hall Sensor (×2) — analog, 4 axes total
-- **OLED:** HiLetgo 2.42" SSD1309 128×64, SPI 7-pin (arriving)
+- **OLED:** HiLetgo 2.42" SSD1309 128×64, SPI 7-pin
 - **Switches:** 2-position toggle — arming (dedicated), mode angle/acro (dedicated)
 - Pin assignments TBD pending wiring
-
-### SD Card Blackbox Logger (Phase 5.5 — planned)
-- Standard SPI micro-SD module (3.3V, level-shifted)
-- Shares SPI1 bus with BMI323 (PA5/PA6/PA7)
-- Dedicated CS: PC0 (GPIO output, to be added in CubeMX)
-- Logs UART telemetry to file for post-flight analysis
 
 ### Debug / Programming
 - ST-Link V2 clone (V2J37S7) — SWD, CLI only
@@ -136,7 +163,7 @@ flare/
 │   │   │   │   ├── main.h
 │   │   │   │   ├── dshot.h        # DSHOT300 driver API
 │   │   │   │   ├── imu_fusion.h   # Complementary filter API
-│   │   │   │   ├── mag.h          # QMC5883L magnetometer driver API
+│   │   │   │   ├── mag.h          # QMC5883P magnetometer driver API
 │   │   │   │   ├── pid.h          # PID controller API
 │   │   │   │   ├── flare.h        # Motor mixing, arming logic API
 │   │   │   │   ├── rc.h           # USART2 RC receiver API
@@ -144,7 +171,7 @@ flare/
 │   │   │   └── Src/
 │   │   │       ├── main.c         # Boot sequence, 100Hz loop, UART output
 │   │   │       ├── imu_fusion.c   # Complementary filter (roll, pitch, yaw)
-│   │   │       ├── mag.c          # QMC5883P driver (retiring → QMC5883L)
+│   │   │       ├── mag.c          # QMC5883P magnetometer driver
 │   │   │       ├── dshot.c        # DSHOT300 direct DMA output
 │   │   │       ├── pid.c          # PID controller
 │   │   │       ├── flare.c        # Motor mixing, arming logic
@@ -217,58 +244,40 @@ C:\Users\alexg\.platformio\penv\Scripts\platformio.exe run --target upload --env
 C:\Users\alexg\.platformio\penv\Scripts\platformio.exe device monitor --environment arduino_nano_esp32 --baud 115200
 ```
 
-> **Note:** First flash on a new Windows machine requires installing the Arduino
-> Nano ESP32 board through Arduino IDE once to provision the DFU driver.
-> After that, PlatformIO uploads work without Arduino IDE.
+---
 
-**clangd compile commands** are exported automatically via
-`CMAKE_EXPORT_COMPILE_COMMANDS=TRUE` and pointed at `build/Debug` in `.clangd`.
+## Current PID Gains
+
+| Axis  | kp  | ki  | kd   | int_limit | out_limit |
+|-------|-----|-----|------|-----------|-----------|
+| Roll  | 0.5 | 0.0 | 0.10 | 20.0      | 150.0     |
+| Pitch | 0.5 | 0.0 | 0.10 | 20.0      | 150.0     |
+| Yaw   | 1.2 | 0.0 | 0.05 | 20.0      | 300.0     |
+
+### Gain Tuning Decision Table
+
+| Observation | Action |
+|---|---|
+| Yaw spin >500 °/s at hover throttle | Check motor torque balance — likely physical cause |
+| Yaw drift ~1 °/s at hover | Add ki_yaw = 0.01 |
+| Motors M1/M3 >> M2/M4 at hover | M1 weak — replace motor |
+| Flip above ~43% throttle | Motor saturation + imbalance; do not push above 40% until M1 replaced |
+| Roll/pitch oscillation after motor replacement | Re-evaluate kp; may need slight reduction |
 
 ---
 
-## IMU Configuration
+## Magnetometer Notes
 
-### BMI323 register values
+The QMC5883P on the HGLRC M100-5883 module is wired to I2C1 (PB6/PB7).
 
-| Register | Value    | Meaning                                        |
-|----------|----------|------------------------------------------------|
-| WHO_AM_I | `0x43`   | Chip ID (low byte only — high byte is garbage) |
-| ACC_CONF | `0x4028` | Continuous mode, 100Hz ODR, ±8g range          |
-| GYR_CONF | `0x4048` | Continuous mode, 100Hz ODR, ±2000dps range     |
-
-### SPI protocol (confirmed working)
-
-**Read (4 bytes):**
-```
-TX: [addr | 0x80]  [0x00 dummy]  [0x00]  [0x00]
-RX: [ignored]      [ignored]     [LSB]   [MSB]
-```
-`return (uint16_t)(rx[2] | (rx[3] << 8));`
-
-**Write (4 bytes):**
-```
-TX: [addr & 0x7F]  [data_LSB]  [data_MSB]  [0x00 dummy]
-```
-
----
-
-## Magnetometer Status
-
-The GY-271 (QMC5883P) external module is retired. The HGLRC M100-5883 GPS
-module includes an onboard **QMC5883L** magnetometer accessible via I2C1
-(PB6/PB7). Wiring and driver are deferred until GPS is verified working
-outdoors. Until then, `mag_ok = 0` and yaw is gyro-only (drifts over time).
-
-### Hard-iron calibration (not yet done)
-
-Rotate FC slowly through 360° in yaw, record min/max raw X and Y values, then:
+### Hard-iron calibration (completed)
 
 ```c
-mag_cal.offset_x = (max_x + min_x) / 2.0f;
-mag_cal.offset_y = (max_y + min_y) / 2.0f;
+offset_x = -251.0f;
+offset_y =   41.5f;
 ```
 
-Calibrate after the sensor is in its final mounted position on the frame.
+Applied in `main.c` before fusion. Yaw stable at ~161–165° stationary.
 
 ---
 
@@ -364,9 +373,9 @@ A complementary filter runs at 100Hz producing roll, pitch, and yaw in degrees.
 ### Algorithm
 
 ```
-// Roll and pitch — accel reference
-roll_accel  = atan2(ay_g, az_g)  × (180/π)
-pitch_accel = atan2(-ax_g, az_g) × (180/π)
+// Roll and pitch — accel reference (with mounting offsets applied)
+roll_accel  = atan2(ay_g, az_g)  × (180/π) - IMU_ROLL_OFFSET
+pitch_accel = atan2(-ax_g, az_g) × (180/π) - IMU_PITCH_OFFSET
 
 // Gyro integration
 roll_gyro  = roll_prev  + gx_dps × dt
@@ -377,7 +386,7 @@ yaw_gyro   = yaw_prev   + gz_dps × dt
 roll  = α × roll_gyro  + (1−α) × roll_accel
 pitch = α × pitch_gyro + (1−α) × pitch_accel
 
-// Yaw — gyro only until QMC5883L compass driver implemented
+// Yaw — gyro only until mag-fused yaw hold implemented
 yaw = yaw_gyro   (drifts over time)
 ```
 
@@ -387,6 +396,8 @@ yaw = yaw_gyro   (drifts over time)
 |-----------|--------|-------------------------------------------------|
 | α (alpha) | 0.96   | Roll/pitch gyro weight                          |
 | dt        | 0.01s  | Matches 10ms loop tick                          |
+| IMU_ROLL_OFFSET  | +0.27° | Bench-calibrated mounting offset       |
+| IMU_PITCH_OFFSET | −3.80° | Bench-calibrated mounting offset       |
 | ACC scale | `8.0 / 32768.0` g/LSB  | ±8g range                    |
 | GYR scale | `2000.0 / 32768.0` dps/LSB | ±2000dps range           |
 
@@ -406,8 +417,8 @@ Boot messages:
 [IMU] ACC write   = 0x4028 (expect 0x4028)
 [IMU] GYR write   = 0x4048 (expect 0x4048)
 [FUSION] complementary filter ready
-[MAG] chip ID = 0x00
-[MAG] INIT FAILED -- skipping mag reads   ← expected until QMC5883L driver written
+[MAG] chip ID = 0x80
+[MAG] QMC5883P ready
 [FLARE] PID controller ready
 [RC] init status=0 (0=OK)
 [RC] USART2 receiver ready
@@ -452,8 +463,25 @@ Regenerating code in CubeMX can:
 - Move `/* USER CODE END WHILE */` outside the loop body
 - Wipe MPU region config from `MPU_Config()` — always restore Region 1
   (AXI SRAM at `0x24000000`) after regen
+- Wipe NVIC lines for USART2 — must be kept inside USER CODE blocks
 
 Always inspect `main.c` after any CubeMX regeneration before building.
+
+---
+
+## Known Issues & Gotchas
+
+- **SD/IMU SPI sharing:** SD writes on SPI1 can cause single-sample BMI323 accel
+  dropouts. Mitigation: last-known-good accel guard in fusion loop.
+- **f_printf float support:** FatFS `f_printf` has no `%f` — all floats scaled
+  to integers permanently. Never attempt `%f` in log writes.
+- **GPIO43/44 on Nano ESP32:** Must never be assigned to hardware UART — corrupts
+  USB Serial/JTAG stack unrecoverably without chip erase.
+- **ESC arming window:** DSHOT 0 frames must reach ESC within ~300ms of power-on.
+  Arm immediately after `DSHOT_Init()`, before IMU init delays.
+- **M1 motor weakness:** M1 (Front-Left, CCW) produces less thrust than M3 at
+  equivalent DSHOT values. Causes persistent left roll bias under aerodynamic load.
+  Replacement required before stable hover is achievable.
 
 ---
 
@@ -462,15 +490,15 @@ Always inspect `main.c` after any CubeMX regeneration before building.
 ```
 <type>(<scope>): <description>
 
-Types:  feat, fix, test, docs, refactor, chore
+Types:  feat, fix, tune, test, docs, refactor, chore
 Scopes: fc/imu, fc/fusion, fc/mag, fc/pid, fc/dshot, fc/main, fc/rc, fc/gps,
-        esp32/quad, esp32/remote, shared, docs
+        esp32/quad, esp32/remote, shared, docs, control
 ```
 
 Examples:
 ```
 feat(fc/gps): replace NEO-6M NMEA parser with UBX binary for M100-5883
-fix(esp32/remote): update kQuadMac to match quad-side Nano MAC after reflash
-feat(fc/sd): add SPI micro-SD blackbox logger
-docs: update all docs for Phase 4.5 completion and Phase 5.5 planning
+fix(fc/imu): apply IMU mounting offset correction in complementary filter
+tune(control): increase yaw kp and output limit for authority at hover
+docs: update README for session 22 — flight testing progress
 ```
