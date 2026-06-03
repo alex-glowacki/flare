@@ -46,7 +46,7 @@ void FLARE_Init(void) {
      */
     PID_Init(&pid_roll,  0.5f, 0.0f, 0.10f, 20.0f, 150.0f);
     PID_Init(&pid_pitch, 0.5f, 0.0f, 0.10f, 20.0f, 150.0f);
-    PID_Init(&pid_yaw,   0.8f, 0.0f, 0.00f, 20.0f, 150.0f);
+    PID_Init(&pid_yaw,   0.8f, 0.0f, 0.05f, 20.0f, 150.0f);
 }
 
 void FLARE_Update(float roll, float pitch, float gx, float gy, float gz, float dt) {

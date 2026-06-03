@@ -17,12 +17,22 @@
  */
 #define GYR_SCALE (2000.0f / 32768.0f)
 
+/*
+ * IMU mounting offset correction.
+ * Measured from LOG001.CSV post-disarm settling (t=80-88s, motors off,
+ * frame stationary on flat ground). Subtract from accel-derived angles
+ * so the complementary filter treats level-frame as 0°/0°.
+ * Re-calibrate if the IMU is remounted.
+ */
+#define IMU_ROLL_OFFSET  ( 0.27f)   /* deg — roll reading when frame is level  */
+#define IMU_PITCH_OFFSET (-3.80f)   /* deg — pitch reading when frame is level */
+
 /* ── Public API implementation ───────────────────────────────────────────── */
 
 void IMU_Fusion_Init(IMU_Fusion_t *f) {
-  f->roll = 0.0f;
+  f->roll  = 0.0f;
   f->pitch = 0.0f;
-  f->yaw = 0.0f;
+  f->yaw   = 0.0f;
 }
 
 void IMU_Fusion_Update(IMU_Fusion_t *f, int16_t ax, int16_t ay, int16_t az,
@@ -41,19 +51,20 @@ void IMU_Fusion_Update(IMU_Fusion_t *f, int16_t ax, int16_t ay, int16_t az,
   /* ── 2. Accel-derived roll and pitch (degrees) ────────────────────────── */
   /*
    * atan2f gives the angle in radians; multiply by (180/π) to convert.
-   * Only accurate when near-static (accel ≈ gravity). Gyro corrects
-   * for dynamic motion via the complementary filter below.
+   * Mounting offsets are subtracted here so the accel reference treats
+   * the physical frame level as 0°. The gyro path inherits the correction
+   * through the complementary filter blend each update cycle.
    */
-  float roll_accel = atan2f(ay_g, az_g) * (180.0f / (float)M_PI);
-  float pitch_accel = atan2f(-ax_g, az_g) * (180.0f / (float)M_PI);
+  float roll_accel  = atan2f(ay_g, az_g)  * (180.0f / (float)M_PI) - IMU_ROLL_OFFSET;
+  float pitch_accel = atan2f(-ax_g, az_g) * (180.0f / (float)M_PI) - IMU_PITCH_OFFSET;
 
   /* ── 3. Gyro-integrated roll, pitch, and yaw (degrees) ───────────────── */
-  float roll_gyro = f->roll + gx_dps * dt;
+  float roll_gyro  = f->roll  + gx_dps * dt;
   float pitch_gyro = f->pitch + gy_dps * dt;
-  float yaw_gyro = f->yaw + gz_dps * dt;
+  float yaw_gyro   = f->yaw   + gz_dps * dt;
 
   /* ── 4. Complementary filter — roll and pitch ────────────────────────── */
-  f->roll = alpha * roll_gyro + (1.0f - alpha) * roll_accel;
+  f->roll  = alpha * roll_gyro  + (1.0f - alpha) * roll_accel;
   f->pitch = alpha * pitch_gyro + (1.0f - alpha) * pitch_accel;
 
   /* ── 5. Complementary filter — yaw (gyro + magnetometer) ─────────────── */
@@ -74,18 +85,14 @@ void IMU_Fusion_Update(IMU_Fusion_t *f, int16_t ax, int16_t ay, int16_t az,
   float delta = mag_heading - yaw_gyro;
 
   /* Normalise delta to (-180, +180] */
-  while (delta > 180.0f)
-    delta -= 360.0f;
-  while (delta < -180.0f)
-    delta += 360.0f;
+  while (delta >  180.0f) delta -= 360.0f;
+  while (delta < -180.0f) delta += 360.0f;
 
   float yaw_fused = yaw_gyro + (1.0f - beta) * delta;
 
   /* Normalise fused yaw to [0, 360) */
-  while (yaw_fused < 0.0f)
-    yaw_fused += 360.0f;
-  while (yaw_fused >= 360.0f)
-    yaw_fused -= 360.0f;
+  while (yaw_fused <    0.0f) yaw_fused += 360.0f;
+  while (yaw_fused >= 360.0f) yaw_fused -= 360.0f;
 
   f->yaw = yaw_fused;
 }
