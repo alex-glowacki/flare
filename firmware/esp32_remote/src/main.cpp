@@ -7,6 +7,11 @@
 //   GPIO17 (TX, D4) → STM32 RX
 //   GPIO18 (RX, D5) → STM32 TX  (unused in Phase 5, reserved)
 //   GND             → GND
+//
+// Display states:
+//   SPLASH  → shown for SPLASH_DURATION_MS on power-on
+//   IDLE    → shown while disarmed (mode == SAFE)
+//   FLYING  → shown while armed (mode == ANGLE or ACRO)
 // =============================================================================
 
 #include <Arduino.h>
@@ -31,54 +36,39 @@ static const uint8_t kQuadMac[6] = {0xD4, 0xE9, 0xF4, 0xE6, 0xE9, 0x90};
 //   Left gimbal:  throttle ← X-axis (A1), yaw ← Y-axis (A0)
 //   Right gimbal: roll     ← Y-axis (A2), pitch ← X-axis (A3)
 // ---------------------------------------------------------------------------
-
-// Analog stick axes (0-4095 ADC, 12-bit)
 #define PIN_THROTTLE A1  // left gimbal X-axis  (was A0 pre-rotation)
 #define PIN_YAW A0       // left gimbal Y-axis  (was A1 pre-rotation)
 #define PIN_PITCH A3     // right gimbal X-axis (was A2 pre-rotation)
 #define PIN_ROLL A2      // right gimbal Y-axis (was A3 pre-rotation)
 
-// Digital switches (INPUT_PULLUP — LOW = active)
 #define PIN_MODE_SWITCH_A D3  // mode switch terminal 1 (UP)   — LOW = ANGLE
 #define PIN_MODE_SWITCH_B D4  // mode switch terminal 3 (DOWN) — LOW = ACRO
 //
 // Mode switch truth table:
 //   D3=LOW,  D4=HIGH → FLARE_MODE_ANGLE (UP position)
-//   D3=HIGH, D4=HIGH → FLARE_MODE_SAFE  (CENTER position — forces disarm on FC)
+//   D3=HIGH, D4=HIGH → FLARE_MODE_SAFE  (CENTER — forces disarm on FC)
 //   D3=HIGH, D4=LOW  → FLARE_MODE_ACRO  (DOWN position)
 
 // ---------------------------------------------------------------------------
-// OLED pin assignments — HiLetgo 2.42" SSD1309 SPI
+// OLED — HiLetgo 2.42" SSD1309 SPI
 // ---------------------------------------------------------------------------
 #define PIN_OLED_CS D10
 #define PIN_OLED_DC D6
 #define PIN_OLED_RST D7
 
-// ---------------------------------------------------------------------------
-// U8g2 — SSD1309 128x64, hardware SPI
-// ---------------------------------------------------------------------------
 static U8G2_SSD1309_128X64_NONAME0_F_4W_HW_SPI u8g2(U8G2_R0, PIN_OLED_CS,
                                                     PIN_OLED_DC, PIN_OLED_RST);
 
 // ---------------------------------------------------------------------------
-// Transmit / display rates
+// Timing
 // ---------------------------------------------------------------------------
 #define TX_RATE_HZ 50
 #define TX_INTERVAL_MS (1000 / TX_RATE_HZ)  // 20ms
-#define DISP_INTERVAL_MS 100                // 10Hz
+#define DISP_INTERVAL_MS 100                // 10Hz display refresh
+#define SPLASH_DURATION_MS 2000             // 2s splash on boot
 
 // ---------------------------------------------------------------------------
 // ADC calibration — per axis, measured on hardware
-//
-// Throttle (A1): no spring center — ADC_CENTER unused for this axis
-// Yaw     (A0): spring centered
-// Pitch   (A3): spring centered
-// Roll    (A2): spring centered
-//
-// Deadband applied around center in raw ADC counts.
-//
-// NOTE: cal values are per physical axis — update these after remounting
-//       if ADC min/center/max readings change on the swapped pins.
 // ---------------------------------------------------------------------------
 struct AxisCal {
     uint16_t min;
@@ -88,12 +78,10 @@ struct AxisCal {
     bool reversed;
 };
 
-// min, center, max, deadband, reversed
-static const AxisCal kThrottle = {326, 0, 3869, 0,
-                                  false};  // A1 - no center/deadband
-static const AxisCal kYaw = {253, 1949, 3418, 60, false};   // A0
-static const AxisCal kPitch = {38, 1803, 3129, 40, false};  // A3
-static const AxisCal kRoll = {251, 1623, 3647, 40, false};  // A2
+static const AxisCal kThrottle = {326, 0, 3869, 0, false};
+static const AxisCal kYaw = {253, 1949, 3418, 60, false};
+static const AxisCal kPitch = {38, 1803, 3129, 40, false};
+static const AxisCal kRoll = {251, 1623, 3647, 40, false};
 
 // ---------------------------------------------------------------------------
 // Diagnostics
@@ -101,8 +89,24 @@ static const AxisCal kRoll = {251, 1623, 3647, 40, false};  // A2
 static uint32_t packets_sent = 0;
 static uint32_t packets_failed = 0;
 
-// Last packet state — used by display update
+// Last sent packet — read by display update
 static FLARE_RC_Packet_t last_pkt = {};
+
+// ---------------------------------------------------------------------------
+// Display state machine
+// ---------------------------------------------------------------------------
+enum DisplayState { DISP_SPLASH, DISP_IDLE, DISP_FLYING };
+
+static DisplayState disp_state = DISP_SPLASH;
+static uint32_t splash_start = 0;
+
+// ---------------------------------------------------------------------------
+// Telemetry placeholders — replaced by real downlink values in future
+// ---------------------------------------------------------------------------
+static uint8_t telem_sats = 0;
+static uint16_t telem_heading = 0;  // degrees
+static int32_t telem_alt_dm = 0;    // decimetres (alt_m * 10)
+static uint16_t telem_spd_cms = 0;  // cm/s      (spd_ms * 100)
 
 // ---------------------------------------------------------------------------
 // ESP-NOW send callback
@@ -110,22 +114,14 @@ static FLARE_RC_Packet_t last_pkt = {};
 static void on_packet_sent(const uint8_t* mac_addr,
                            esp_now_send_status_t status) {
     (void)mac_addr;
-    if (status == ESP_NOW_SEND_SUCCESS) {
+    if (status == ESP_NOW_SEND_SUCCESS)
         packets_sent++;
-    } else {
+    else
         packets_failed++;
-    }
 }
 
 // ---------------------------------------------------------------------------
 // map_stick()
-//
-// Maps a raw ADC reading to a PWM channel value (FLARE_CH_MIN–FLARE_CH_MAX).
-// Applies per-axis deadband around center, then linearly maps the two halves
-// (min→center, center→max) independently to handle asymmetric ADC ranges.
-//
-// For throttle: pass cal.center == 0 and cal.deadband == 0 — a straight
-// single-segment map from min→max is used instead.
 // ---------------------------------------------------------------------------
 static uint16_t map_stick(uint16_t raw, const AxisCal& cal) {
     raw = constrain(raw, cal.min, cal.max);
@@ -133,16 +129,12 @@ static uint16_t map_stick(uint16_t raw, const AxisCal& cal) {
     uint16_t mapped;
 
     if (cal.center == 0) {
-        // Throttle path — no center, no deadband, straight map
         mapped =
             (uint16_t)map(raw, cal.min, cal.max, FLARE_CH_MIN, FLARE_CH_MAX);
     } else {
-        // Apply deadband
         if (abs((int)raw - (int)cal.center) < (int)cal.deadband) {
             raw = cal.center;
         }
-
-        // Map each half independently to handle asymmetric ADC ranges
         if (raw <= cal.center) {
             mapped = (uint16_t)map(raw, cal.min, cal.center, FLARE_CH_MIN,
                                    FLARE_CH_MID);
@@ -153,72 +145,231 @@ static uint16_t map_stick(uint16_t raw, const AxisCal& cal) {
     }
 
     mapped = constrain(mapped, FLARE_CH_MIN, FLARE_CH_MAX);
-
-    if (cal.reversed) {
-        mapped = FLARE_CH_MIN + FLARE_CH_MAX - mapped;
-    }
-
+    if (cal.reversed) mapped = FLARE_CH_MIN + FLARE_CH_MAX - mapped;
     return mapped;
 }
 
 // ---------------------------------------------------------------------------
-// read_mode()
-//
-// Reads the two mode switch pins and returns the appropriate FLARE_MODE_*
-// constant. CENTER position (both HIGH) returns FLARE_MODE_SAFE which the
-// FC treats as disarmed regardless of arm switch state.
+// read_mode() / read_mode_debounced()
 // ---------------------------------------------------------------------------
 static uint8_t read_mode() {
-    bool a = (digitalRead(PIN_MODE_SWITCH_A) == LOW);  // UP position
-    bool b = (digitalRead(PIN_MODE_SWITCH_B) == LOW);  // DOWN position
-
+    bool a = (digitalRead(PIN_MODE_SWITCH_A) == LOW);
+    bool b = (digitalRead(PIN_MODE_SWITCH_B) == LOW);
     if (a) return FLARE_MODE_ANGLE;
     if (b) return FLARE_MODE_ACRO;
     return FLARE_MODE_SAFE;
 }
 
-// ---------------------------------------------------------------------------
-// update_display()
-// ---------------------------------------------------------------------------
-static void update_display() {
-    uint8_t thr_pct =
-        (uint8_t)map(last_pkt.throttle, FLARE_CH_MIN, FLARE_CH_MAX, 0, 100);
+#define DEBOUNCE_MS 20
 
-    bool armed = (last_pkt.armed == FLARE_ARMED);
-    bool safe = (last_pkt.mode == FLARE_MODE_SAFE);
-    bool acro = (last_pkt.mode == FLARE_MODE_ACRO);
+static uint8_t read_mode_debounced() {
+    static uint8_t last_stable = FLARE_MODE_SAFE;
+    static uint8_t candidate = FLARE_MODE_SAFE;
+    static uint32_t changed_at = 0;
 
+    uint8_t current = read_mode();
+    if (current != candidate) {
+        candidate = current;
+        changed_at = millis();
+    }
+    if ((millis() - changed_at) >= DEBOUNCE_MS) {
+        last_stable = candidate;
+    }
+    return last_stable;
+}
+
+// ---------------------------------------------------------------------------
+// mode_str()
+// ---------------------------------------------------------------------------
+static const char* mode_str(uint8_t mode) {
+    switch (mode) {
+        case FLARE_MODE_ANGLE:
+            return "ANGLE";
+        case FLARE_MODE_ACRO:
+            return "ACRO";
+        default:
+            return "SAFE";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// draw_splash()
+// ---------------------------------------------------------------------------
+static void draw_splash() {
+    u8g2.clearBuffer();
+
+    u8g2.setFont(u8g2_font_logisoso16_tr);
+    uint8_t w = u8g2.getStrWidth("FLARE");
+    u8g2.setCursor((128 - w) / 2, 28);
+    u8g2.print("FLARE");
+
+    u8g2.setFont(u8g2_font_6x12_tr);
+    w = u8g2.getStrWidth("Flight Lab");
+    u8g2.setCursor((128 - w) / 2, 44);
+    u8g2.print("Flight Lab");
+
+    w = u8g2.getStrWidth("v0.1.0");
+    u8g2.setCursor((128 - w) / 2, 57);
+    u8g2.print("v0.1.0");
+
+    u8g2.sendBuffer();
+}
+
+// ---------------------------------------------------------------------------
+// draw_idle()
+//
+//   DISARMED  |  SAFE
+//   SAT:  0   |  0°
+//   ALT:  --m
+//   BATT: --.-V   RSSI:---%
+// ---------------------------------------------------------------------------
+static void draw_idle() {
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x12_tr);
 
-    // Row 1 — identity + arm state
+    uint8_t mode = last_pkt.mode;
+
+    // Row 1 — arm state | mode
     u8g2.setCursor(0, 12);
-    u8g2.print("FLARE");
-    u8g2.setCursor(48, 12);
-    u8g2.print(!armed ? "DISARMED" : (safe ? "SAFE" : "** ARMED **"));
+    u8g2.print("DISARMED");
+    u8g2.setCursor(78, 12);
+    u8g2.print(mode_str(mode));
 
-    // Divider
-    u8g2.drawHLine(0, 15, 128);
+    u8g2.drawHLine(0, 14, 128);
+    u8g2.drawVLine(72, 0, 14);
 
-    // Row 2 — flight mode
-    u8g2.setCursor(0, 28);
-    u8g2.print("Mode: ");
-    u8g2.print(safe ? "SAFE" : (acro ? "ACRO" : "ANGLE"));
+    // Row 2 — satellites | heading
+    u8g2.setCursor(0, 26);
+    u8g2.print("SAT: ");
+    u8g2.print(telem_sats);
+    u8g2.setCursor(78, 26);
+    u8g2.print(telem_heading);
+    u8g2.print((char)176);
 
-    // Row 3 — throttle
-    u8g2.setCursor(0, 42);
-    u8g2.print("Thr: ");
-    u8g2.print(thr_pct);
-    u8g2.print("%");
+    // Row 3 — altitude
+    u8g2.setCursor(0, 40);
+    u8g2.print("ALT: ");
+    if (telem_alt_dm == 0) {
+        u8g2.print("--");
+    } else {
+        u8g2.print(telem_alt_dm / 10);
+        u8g2.print(".");
+        u8g2.print(telem_alt_dm % 10);
+    }
+    u8g2.print("m");
 
-    // Row 4 — TX diagnostics
-    u8g2.setCursor(0, 56);
-    u8g2.print("TX ");
-    u8g2.print(packets_sent);
-    u8g2.print("/");
-    u8g2.print(packets_failed);
+    // Row 4 — battery + RSSI placeholders
+    u8g2.setCursor(0, 54);
+    u8g2.print("BATT:--.-V  RSSI:---%");
 
     u8g2.sendBuffer();
+}
+
+// ---------------------------------------------------------------------------
+// draw_flying()
+//
+//   ARMED   |  ANGLE
+//   SAT:  0 |  0°
+//   ALT: --m   SPD:--
+//   THR 50% [1500]
+//   BATT: --.-V
+// ---------------------------------------------------------------------------
+static void draw_flying() {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_6x12_tr);
+
+    uint8_t mode = last_pkt.mode;
+    uint16_t thr_raw = last_pkt.throttle;
+    uint8_t thr_pct = (uint8_t)map(thr_raw, FLARE_CH_MIN, FLARE_CH_MAX, 0, 100);
+
+    // Row 1 — arm state | mode
+    u8g2.setCursor(0, 12);
+    u8g2.print("ARMED");
+    u8g2.setCursor(78, 12);
+    u8g2.print(mode_str(mode));
+
+    u8g2.drawHLine(0, 14, 128);
+    u8g2.drawVLine(72, 0, 14);
+
+    // Row 2 — satellites | heading
+    u8g2.setCursor(0, 26);
+    u8g2.print("SAT:");
+    u8g2.print(telem_sats);
+    u8g2.setCursor(78, 26);
+    u8g2.print(telem_heading);
+    u8g2.print((char)176);
+
+    // Row 3 — altitude | speed
+    u8g2.setCursor(0, 38);
+    u8g2.print("ALT:");
+    if (telem_alt_dm == 0) {
+        u8g2.print("--");
+    } else {
+        u8g2.print(telem_alt_dm / 10);
+        u8g2.print(".");
+        u8g2.print(telem_alt_dm % 10);
+    }
+    u8g2.print("m");
+
+    u8g2.setCursor(66, 38);
+    u8g2.print("SPD:");
+    if (telem_spd_cms == 0) {
+        u8g2.print("--");
+    } else {
+        u8g2.print(telem_spd_cms / 100);
+        u8g2.print(".");
+        u8g2.print((telem_spd_cms % 100) / 10);
+    }
+
+    // Row 4 — throttle % and raw RC value
+    u8g2.setCursor(0, 50);
+    u8g2.print("THR ");
+    u8g2.print(thr_pct);
+    u8g2.print("% [");
+    u8g2.print(thr_raw);
+    u8g2.print("]");
+
+    // Row 5 — battery placeholder
+    u8g2.setCursor(0, 62);
+    u8g2.print("BATT: --.-V");
+
+    u8g2.sendBuffer();
+}
+
+// ---------------------------------------------------------------------------
+// update_display()
+//
+// armed = mode is ANGLE or ACRO (matches read_and_send() logic exactly)
+// ---------------------------------------------------------------------------
+static void update_display() {
+    bool armed = (last_pkt.armed == FLARE_ARMED);
+
+    switch (disp_state) {
+        case DISP_SPLASH:
+            if ((millis() - splash_start) >= SPLASH_DURATION_MS) {
+                disp_state = armed ? DISP_FLYING : DISP_IDLE;
+                armed ? draw_flying() : draw_idle();
+            }
+            break;
+
+        case DISP_IDLE:
+            if (armed) {
+                disp_state = DISP_FLYING;
+                draw_flying();
+            } else {
+                draw_idle();
+            }
+            break;
+
+        case DISP_FLYING:
+            if (!armed) {
+                disp_state = DISP_IDLE;
+                draw_idle();
+            } else {
+                draw_flying();
+            }
+            break;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -233,7 +384,7 @@ static void read_and_send() {
     pkt.pitch = map_stick(analogRead(PIN_PITCH), kPitch);
     pkt.roll = map_stick(analogRead(PIN_ROLL), kRoll);
 
-    pkt.mode = read_mode();
+    pkt.mode = read_mode_debounced();
     pkt.armed = (pkt.mode != FLARE_MODE_SAFE) ? FLARE_ARMED : FLARE_DISARMED;
 
     pkt.reserved[0] = 0;
@@ -241,7 +392,6 @@ static void read_and_send() {
     pkt.checksum = flare_checksum(&pkt);
 
     esp_now_send(kQuadMac, (const uint8_t*)&pkt, FLARE_PACKET_SIZE);
-
     last_pkt = pkt;
 }
 
@@ -253,17 +403,14 @@ void setup() {
     delay(500);
     Serial.println("[FLARE] esp32_remote booting...");
 
-    // OLED init
-    u8g2.begin();
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_6x12_tr);
-    u8g2.setCursor(0, 12);
-    u8g2.print("FLARE booting...");
-    u8g2.sendBuffer();
-
     // Switch pins
     pinMode(PIN_MODE_SWITCH_A, INPUT_PULLUP);
     pinMode(PIN_MODE_SWITCH_B, INPUT_PULLUP);
+
+    // OLED — draw splash immediately
+    u8g2.begin();
+    splash_start = millis();
+    draw_splash();
 
     // ESP-NOW
     WiFi.mode(WIFI_STA);
@@ -275,6 +422,7 @@ void setup() {
     if (esp_now_init() != ESP_OK) {
         Serial.println("[FLARE] ERROR: esp_now_init() failed - halting");
         u8g2.clearBuffer();
+        u8g2.setFont(u8g2_font_6x12_tr);
         u8g2.setCursor(0, 12);
         u8g2.print("ESP-NOW FAIL");
         u8g2.sendBuffer();
@@ -293,6 +441,7 @@ void setup() {
     if (esp_now_add_peer(&peer) != ESP_OK) {
         Serial.println("[FLARE] ERROR: esp_now_add_peer() failed - halting");
         u8g2.clearBuffer();
+        u8g2.setFont(u8g2_font_6x12_tr);
         u8g2.setCursor(0, 12);
         u8g2.print("PEER ADD FAIL");
         u8g2.sendBuffer();
@@ -306,16 +455,10 @@ void setup() {
         "[FLARE] Transmitting to %02X:%02X:%02X:%02X:%02X:%02X at %dHz\n",
         kQuadMac[0], kQuadMac[1], kQuadMac[2], kQuadMac[3], kQuadMac[4],
         kQuadMac[5], TX_RATE_HZ);
-
-    u8g2.clearBuffer();
-    u8g2.setCursor(0, 12);
-    u8g2.print("FLARE ready");
-    u8g2.sendBuffer();
-    delay(500);
 }
 
 // ---------------------------------------------------------------------------
-// loop() — 50Hz transmit + 10Hz display + 5s serial diagnostics
+// loop()
 // ---------------------------------------------------------------------------
 void loop() {
     static uint32_t last_tx_ms = 0;
