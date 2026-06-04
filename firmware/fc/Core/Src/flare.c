@@ -37,16 +37,15 @@ void FLARE_Init(void) {
     dshot_m4 = 0;
 
     /*
-     * PID gains — Session 20 starting point.
-     * P reduced from 1.5 to 0.8 (gyro rates were hitting ±800 deg/s).
-     * D increased from 0.05 to 0.08 to improve damping.
-     * I remains zero until hover behaviour is validated.
-     * out_limit tightened to 150 to reduce motor saturation during corrections.
+     * PID gains — Session 23.
+     * Roll/Pitch: kp increased 0.5→0.6, out_limit increased 150→200
+     *             for better attitude recovery authority at high throttle.
+     * Yaw: kp=1.5, ki=0.02, out_limit=500 — established over LOG010-014.
      * Args: kp, ki, kd, integral_limit, output_limit
      */
-    PID_Init(&pid_roll,  0.5f, 0.0f, 0.10f, 20.0f, 150.0f);
-    PID_Init(&pid_pitch, 0.5f, 0.0f, 0.10f, 20.0f, 150.0f);
-    PID_Init(&pid_yaw,   1.2f, 0.0f, 0.05f, 20.0f, 300.0f);
+    PID_Init(&pid_roll,  0.6f, 0.0f, 0.10f, 20.0f, 200.0f);
+    PID_Init(&pid_pitch, 0.6f, 0.0f, 0.10f, 20.0f, 200.0f);
+    PID_Init(&pid_yaw,   1.5f, 0.02f, 0.05f, 30.0f, 500.0f);
 }
 
 void FLARE_Update(float roll, float pitch, float gx, float gy, float gz, float dt) {
@@ -79,22 +78,42 @@ void FLARE_Update(float roll, float pitch, float gx, float gy, float gz, float d
     float out_yaw   = PID_Update(&pid_yaw,   state.yaw_rate_sp, 0.0f,  gz, dt);
 
     /*
-     * X-frame motor mixing:
+     * Throttle-proportional yaw feed-forward.
      *
-     *  M1 (Front-Left,  CCW) = throttle - roll + pitch - yaw
-     *  M2 (Front-Right, CW)  = throttle + roll + pitch + yaw
-     *  M3 (Rear-Right,  CCW) = throttle + roll - pitch - yaw
-     *  M4 (Rear-Left,   CW)  = throttle - roll - pitch + yaw
+     * The CCW motor pair (M1/M3) generates slightly more aerodynamic
+     * reaction torque than the CW pair (M2/M4) at high RPM, producing
+     * a net clockwise yaw spin above ~RC 1500 that the PID alone cannot
+     * arrest. Feed-forward applies a preemptive corrective differential
+     * proportional to throttle — boosting CW motors (M2/M4) and reducing
+     * CCW motors (M1/M3) before the error develops.
+     *
+     * ff_gain tuning:
+     *   - Start at 0.05f
+     *   - If yaw spin persists at high throttle: increase by 0.01
+     *   - If yaw bias appears at low/mid throttle: decrease by 0.01
+     *   - Target: gz stays within ±10 dps at RC 1500+ without stick input
+     */
+    const float ff_gain = 0.03f;
+    float yaw_ff = ff_gain * (float)state.throttle;
+
+    /*
+     * X-frame motor mixing with yaw feed-forward:
+     *
+     *  M1 (Front-Left,  CCW) = throttle - roll + pitch - yaw - ff
+     *  M2 (Front-Right, CW)  = throttle + roll + pitch + yaw + ff
+     *  M3 (Rear-Right,  CCW) = throttle + roll - pitch - yaw - ff
+     *  M4 (Rear-Left,   CW)  = throttle - roll - pitch + yaw + ff
      *
      * DSHOT value range: 48 (min throttle) to 2047 (max throttle).
-     * Values below 48 are disarm/special commands — clamp to 48 minimum when armed.
+     * Values below 48 are disarm/special commands — clamp to 48 minimum
+     * when armed. FF cannot push below 48 due to clamp.
      */
     float t = (float)state.throttle;
 
-    float m1 = t - out_roll + out_pitch - out_yaw;
-    float m2 = t + out_roll + out_pitch + out_yaw;
-    float m3 = t + out_roll - out_pitch - out_yaw;
-    float m4 = t - out_roll - out_pitch + out_yaw;
+    float m1 = t - out_roll + out_pitch - out_yaw - yaw_ff;
+    float m2 = t + out_roll + out_pitch + out_yaw + yaw_ff;
+    float m3 = t + out_roll - out_pitch - out_yaw - yaw_ff;
+    float m4 = t - out_roll - out_pitch + out_yaw + yaw_ff;
 
     dshot_m1 = (uint16_t)clamp(m1, 48.0f, 2047.0f);
     dshot_m2 = (uint16_t)clamp(m2, 48.0f, 2047.0f);
