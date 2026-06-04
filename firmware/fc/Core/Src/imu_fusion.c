@@ -29,70 +29,96 @@
 
 /* ── Public API implementation ───────────────────────────────────────────── */
 
-void IMU_Fusion_Init(IMU_Fusion_t *f) {
-  f->roll  = 0.0f;
-  f->pitch = 0.0f;
-  f->yaw   = 0.0f;
+void IMU_Fusion_Init(IMU_Fusion_t *f, float dt, float fc_gyro_hz, float fc_accel_hz) {
+    f->roll  = 0.0f;
+    f->pitch = 0.0f;
+    f->yaw   = 0.0f;
+
+    f->gx_dps = 0.0f;
+    f->gy_dps = 0.0f;
+    f->gz_dps = 0.0f;
+
+    float alpha_gyro  = LPF_ComputeAlpha(dt, fc_gyro_hz);
+    float alpha_accel = LPF_ComputeAlpha(dt, fc_accel_hz);
+
+    LPF_Init(&f->lpf_gx, alpha_gyro);
+    LPF_Init(&f->lpf_gy, alpha_gyro);
+    LPF_Init(&f->lpf_gz, alpha_gyro);
+    LPF_Init(&f->lpf_ax, alpha_accel);
+    LPF_Init(&f->lpf_ay, alpha_accel);
+    LPF_Init(&f->lpf_az, alpha_accel);
 }
 
 void IMU_Fusion_Update(IMU_Fusion_t *f, int16_t ax, int16_t ay, int16_t az,
                        int16_t gx, int16_t gy, int16_t gz, float mag_heading,
                        float dt, float alpha, float beta) {
 
-  /* ── 1. Convert raw LSB → physical units ─────────────────────────────── */
-  float ax_g = (float)ax * ACC_SCALE;
-  float ay_g = (float)ay * ACC_SCALE;
-  float az_g = (float)az * ACC_SCALE;
+    /* ── 1. Convert raw LSB → physical units ─────────────────────────────── */
+    float ax_g = (float)ax * ACC_SCALE;
+    float ay_g = (float)ay * ACC_SCALE;
+    float az_g = (float)az * ACC_SCALE;
 
-  float gx_dps = (float)gx * GYR_SCALE; /* roll rate  */
-  float gy_dps = (float)gy * GYR_SCALE; /* pitch rate */
-  float gz_dps = (float)gz * GYR_SCALE; /* yaw rate   */
+    float gx_dps = (float)gx * GYR_SCALE;
+    float gy_dps = (float)gy * GYR_SCALE;
+    float gz_dps = (float)gz * GYR_SCALE;
 
-  /* ── 2. Accel-derived roll and pitch (degrees) ────────────────────────── */
-  /*
-   * atan2f gives the angle in radians; multiply by (180/π) to convert.
-   * Mounting offsets are subtracted here so the accel reference treats
-   * the physical frame level as 0°. The gyro path inherits the correction
-   * through the complementary filter blend each update cycle.
-   */
-  float roll_accel  = atan2f(ay_g, az_g)  * (180.0f / (float)M_PI) - IMU_ROLL_OFFSET;
-  float pitch_accel = atan2f(-ax_g, az_g) * (180.0f / (float)M_PI) - IMU_PITCH_OFFSET;
+    /* ── 2. Low-pass filter — gyro rates and accel ───────────────────────── */
+    /*
+     * Filter gyro before feeding into integration and PID.
+     * Gyro fc=80Hz: attenuates motor harmonics (~200-400Hz on 1000KV/3S)
+     * while preserving attitude bandwidth. Primary D-term noise guard.
+     *
+     * Filter accel before atan2 angle computation.
+     * Accel fc=30Hz: accel response is slow; aggressive filtering is fine
+     * and reduces the noise contribution to the complementary filter
+     * reference angle.
+     *
+     * Filtered gyro rates are stored in the struct so main.c can pass
+     * them to FLARE_Update without re-converting raw LSB.
+     */
+    gx_dps = LPF_Update(&f->lpf_gx, gx_dps);
+    gy_dps = LPF_Update(&f->lpf_gy, gy_dps);
+    gz_dps = LPF_Update(&f->lpf_gz, gz_dps);
 
-  /* ── 3. Gyro-integrated roll, pitch, and yaw (degrees) ───────────────── */
-  float roll_gyro  = f->roll  + gx_dps * dt;
-  float pitch_gyro = f->pitch + gy_dps * dt;
-  float yaw_gyro   = f->yaw   + gz_dps * dt;
+    f->gx_dps = gx_dps;
+    f->gy_dps = gy_dps;
+    f->gz_dps = gz_dps;
 
-  /* ── 4. Complementary filter — roll and pitch ────────────────────────── */
-  f->roll  = alpha * roll_gyro  + (1.0f - alpha) * roll_accel;
-  f->pitch = alpha * pitch_gyro + (1.0f - alpha) * pitch_accel;
+    ax_g = LPF_Update(&f->lpf_ax, ax_g);
+    ay_g = LPF_Update(&f->lpf_ay, ay_g);
+    az_g = LPF_Update(&f->lpf_az, az_g);
 
-  /* ── 5. Complementary filter — yaw (gyro + magnetometer) ─────────────── */
-  /*
-   * Yaw cannot be corrected by the accelerometer — it has no sensitivity
-   * to rotation around the gravity vector. The magnetometer provides the
-   * absolute heading reference instead.
-   *
-   * The wrap-around problem: if gyro says 359° and mag says 1°, a naive
-   * blend would average to 180° — completely wrong. We instead compute
-   * the shortest angular difference between gyro-integrated yaw and the
-   * mag heading, then apply the correction proportionally.
-   *
-   * shortest_delta is in (-180, +180]. Adding it scaled by (1-beta)
-   * nudges the gyro estimate toward the mag heading by a small amount
-   * each update, without the discontinuity at 0°/360°.
-   */
-  float delta = mag_heading - yaw_gyro;
+    /* ── 3. Accel-derived roll and pitch (degrees) ────────────────────────── */
+    float roll_accel  = atan2f(ay_g, az_g)  * (180.0f / (float)M_PI) - IMU_ROLL_OFFSET;
+    float pitch_accel = atan2f(-ax_g, az_g) * (180.0f / (float)M_PI) - IMU_PITCH_OFFSET;
 
-  /* Normalise delta to (-180, +180] */
-  while (delta >  180.0f) delta -= 360.0f;
-  while (delta < -180.0f) delta += 360.0f;
+    /* ── 4. Gyro-integrated roll, pitch, and yaw (degrees) ───────────────── */
+    float roll_gyro  = f->roll  + gx_dps * dt;
+    float pitch_gyro = f->pitch + gy_dps * dt;
+    float yaw_gyro   = f->yaw   + gz_dps * dt;
 
-  float yaw_fused = yaw_gyro + (1.0f - beta) * delta;
+    /* ── 5. Complementary filter — roll and pitch ────────────────────────── */
+    f->roll  = alpha * roll_gyro  + (1.0f - alpha) * roll_accel;
+    f->pitch = alpha * pitch_gyro + (1.0f - alpha) * pitch_accel;
 
-  /* Normalise fused yaw to [0, 360) */
-  while (yaw_fused <    0.0f) yaw_fused += 360.0f;
-  while (yaw_fused >= 360.0f) yaw_fused -= 360.0f;
+    /* ── 6. Complementary filter — yaw (gyro + magnetometer) ─────────────── */
+    /*
+     * Yaw cannot be corrected by the accelerometer — it has no sensitivity
+     * to rotation around the gravity vector. The magnetometer provides the
+     * absolute heading reference instead.
+     *
+     * shortest_delta normalises the mag-gyro difference to (-180, +180]
+     * to avoid the wrap discontinuity at 0°/360°.
+     */
+    float delta = mag_heading - yaw_gyro;
 
-  f->yaw = yaw_fused;
+    while (delta >  180.0f) delta -= 360.0f;
+    while (delta < -180.0f) delta += 360.0f;
+
+    float yaw_fused = yaw_gyro + (1.0f - beta) * delta;
+
+    while (yaw_fused <    0.0f) yaw_fused += 360.0f;
+    while (yaw_fused >= 360.0f) yaw_fused -= 360.0f;
+
+    f->yaw = yaw_fused;
 }

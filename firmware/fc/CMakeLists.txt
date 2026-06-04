@@ -44,6 +44,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/imu_fusion.c
+    Core/Src/lpf.c
     Core/Src/dshot.c
     Core/Src/pid.c
     Core/Src/flare.c

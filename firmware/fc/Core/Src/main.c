@@ -339,8 +339,8 @@ int main(void)
              gyr_conf_readback);
     UART_Print(msg);
 
-    IMU_Fusion_Init(&imu_fusion);
-    UART_Print("[FUSION] complementary filter ready\r\n");
+    IMU_Fusion_Init(&imu_fusion, 0.01f, 80.0f, 30.0f);
+    UART_Print("[FUSION] complementary filter + LPF ready\r\n");
 
     mag_cal.offset_x = -251.0f;
     mag_cal.offset_y = 41.5f;
@@ -460,10 +460,6 @@ int main(void)
                           imu_gyr_x, imu_gyr_y, imu_gyr_z,
                           mag_heading, 0.01f, 0.96f, 0.90f);
 
-        float gx_dps = imu_gyr_x / 16.384f;
-        float gy_dps = imu_gyr_y / 16.384f;
-        float gz_dps = imu_gyr_z / 16.384f;
-
         float roll_corr  = imu_fusion.roll  - imu_roll_offset;
         float pitch_corr = imu_fusion.pitch - imu_pitch_offset;
 
@@ -497,7 +493,8 @@ int main(void)
             FLARE_SetThrottle(dshot_thr);
             FLARE_SetArmed(1);
             FLARE_Update(roll_corr, pitch_corr,
-                         gx_dps, gy_dps, gz_dps, 0.01f);
+                         imu_fusion.gx_dps, imu_fusion.gy_dps, imu_fusion.gz_dps,
+                         0.01f);
 
             snprintf(msg, sizeof(msg),
                      "[THR] rc=%u dshot=%u m1=%u m2=%u m3=%u m4=%u\r\n",
@@ -509,7 +506,8 @@ int main(void)
             FLARE_SetArmed(0);
             FLARE_SetThrottle(0);
             FLARE_Update(roll_corr, pitch_corr,
-                         gx_dps, gy_dps, gz_dps, 0.0f);
+                         imu_fusion.gx_dps, imu_fusion.gy_dps, imu_fusion.gz_dps,
+                         0.0f);
 
             snprintf(msg, sizeof(msg),
                      "[SAFE] m1=%u m2=%u m3=%u m4=%u\r\n",
