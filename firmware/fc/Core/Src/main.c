@@ -70,6 +70,12 @@
 /* Loop interval — 10ms = 100Hz */
 #define IMU_LOOP_INTERVAL_MS     10
 
+/* ── IMU level calibration ───────────────────────────────────────────────── */
+#define IMU_CAL_SAMPLES          500    /* 5s at 10ms/sample                 */
+#define IMU_CAL_SETTLE           400    /* discard first 4s, average last 1s */
+#define IMU_CAL_AVG_COUNT        (IMU_CAL_SAMPLES - IMU_CAL_SETTLE) /* 100  */
+#define IMU_CAL_MAX_OFFSET_DEG   10.0f  /* sanity limit — halt if exceeded   */
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -368,30 +374,47 @@ int main(void)
     UART_Print("[GPS] USART3 DMA receiver ready\r\n");
     UART_Print("[GPS] waiting for fix (may take 30-120s outdoors)...\r\n");
 
-    /* ── IMU level calibration ───────────────────────────────────────────── */
-    UART_Print("[CAL] Hold still — levelling IMU (2s)...\r\n");
+    /* ── IMU level calibration ───────────────────────────────────────────── *
+     * Runs for IMU_CAL_SAMPLES * 10ms (5 seconds). The first IMU_CAL_SETTLE  *
+     * samples are discarded to let the complementary filter converge; the     *
+     * final IMU_CAL_AVG_COUNT samples (1 second) are averaged for the offset. *
+     *                                                                          *
+     * If either offset exceeds IMU_CAL_MAX_OFFSET_DEG the quad is not level   *
+     * — print a warning and halt rather than fly with a bad calibration.       *
+     * ───────────────────────────────────────────────────────────────────────*/
+    UART_Print("[CAL] Hold still — levelling IMU (5s)...\r\n");
     float imu_roll_offset  = 0.0f;
     float imu_pitch_offset = 0.0f;
     float cal_roll_sum  = 0.0f;
     float cal_pitch_sum = 0.0f;
-    for (int cal_i = 0; cal_i < 200; cal_i++) {
+    for (int cal_i = 0; cal_i < IMU_CAL_SAMPLES; cal_i++) {
         BMI323_ReadAccel();
         BMI323_ReadGyro();
         IMU_Fusion_Update(&imu_fusion,
                           imu_acc_x, imu_acc_y, imu_acc_z,
                           imu_gyr_x, imu_gyr_y, imu_gyr_z,
                           0.0f, 0.01f, 0.96f, 0.90f);
-        if (cal_i >= 150) {
+        if (cal_i >= IMU_CAL_SETTLE) {
             cal_roll_sum  += imu_fusion.roll;
             cal_pitch_sum += imu_fusion.pitch;
         }
         HAL_Delay(10);
     }
-    imu_roll_offset  = cal_roll_sum  / 50.0f;
-    imu_pitch_offset = cal_pitch_sum / 50.0f;
+    imu_roll_offset  = cal_roll_sum  / (float)IMU_CAL_AVG_COUNT;
+    imu_pitch_offset = cal_pitch_sum / (float)IMU_CAL_AVG_COUNT;
     snprintf(msg, sizeof(msg), "[CAL] level offset: roll=%.2f  pitch=%.2f\r\n",
              imu_roll_offset, imu_pitch_offset);
     UART_Print(msg);
+
+    /* Sanity check — offsets beyond ±10° mean the quad wasn't level */
+    if (imu_roll_offset  >  IMU_CAL_MAX_OFFSET_DEG ||
+        imu_roll_offset  < -IMU_CAL_MAX_OFFSET_DEG ||
+        imu_pitch_offset >  IMU_CAL_MAX_OFFSET_DEG ||
+        imu_pitch_offset < -IMU_CAL_MAX_OFFSET_DEG) {
+        UART_Print("[CAL] ERROR -- offset exceeds ±10 deg, quad not level -- HALTING\r\n");
+        Error_Handler();
+    }
+    UART_Print("[CAL] offsets OK\r\n");
 
     UART_Print("[IMU] starting 100Hz loop\r\n");
 
