@@ -93,8 +93,8 @@ void FLARE_Update(float roll, float pitch, float gx, float gy, float gz, float d
      *   - If yaw bias appears at low/mid throttle: decrease by 0.01
      *   - Target: gz stays within ±10 dps at RC 1500+ without stick input
      */
-    const float ff_gain = 0.03f;
-    float yaw_ff = ff_gain * (float)state.throttle;
+    const float ff_gain = 0.030f;
+    float yaw_ff = ff_gain * (float)(state.throttle - 1000);
 
     /*
      * X-frame motor mixing with yaw feed-forward:

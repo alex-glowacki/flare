@@ -71,8 +71,8 @@
 #define IMU_LOOP_INTERVAL_MS     10
 
 /* ── IMU level calibration ───────────────────────────────────────────────── */
-#define IMU_CAL_SAMPLES          500    /* 5s at 10ms/sample                 */
-#define IMU_CAL_SETTLE           400    /* discard first 4s, average last 1s */
+#define IMU_CAL_SAMPLES          1000    /* 10s at 10ms/sample                 */
+#define IMU_CAL_SETTLE           900     /* discard first 9s, average last 1s */
 #define IMU_CAL_AVG_COUNT        (IMU_CAL_SAMPLES - IMU_CAL_SETTLE) /* 100  */
 #define IMU_CAL_MAX_OFFSET_DEG   10.0f  /* sanity limit — halt if exceeded   */
 
