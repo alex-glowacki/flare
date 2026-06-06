@@ -45,7 +45,7 @@ void FLARE_Init(void) {
      */
     PID_Init(&pid_roll,  0.6f, 0.0f, 0.10f, 20.0f, 200.0f);
     PID_Init(&pid_pitch, 0.6f, 0.0f, 0.10f, 20.0f, 200.0f);
-    PID_Init(&pid_yaw,   1.5f, 0.02f, 0.05f, 30.0f, 500.0f);
+    PID_Init(&pid_yaw,   1.5f, 0.02f, 0.05f, 150.0f, 500.0f);
 }
 
 void FLARE_Update(float roll, float pitch, float gx, float gy, float gz, float dt) {
@@ -93,7 +93,7 @@ void FLARE_Update(float roll, float pitch, float gx, float gy, float gz, float d
      *   - If yaw bias appears at low/mid throttle: decrease by 0.01
      *   - Target: gz stays within ±10 dps at RC 1500+ without stick input
      */
-    const float ff_gain = 0.030f;
+    const float ff_gain = 0.00f; /* disable FF temporarily */
     float yaw_ff = ff_gain * (float)(state.throttle - 1000);
 
     /*
